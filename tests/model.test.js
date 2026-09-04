@@ -348,6 +348,32 @@ test("a fresh config ships the preset library and one profile", () => {
   assert.ok(config.layouts.length >= 8)
 })
 
+test("restoring defaults hands every workspace back to Hyprland", () => {
+  // What the Restore defaults button writes. The reset is only real if no
+  // workspace is left claimed and the fallback is a built-in, otherwise the
+  // user would still be tiling under this plugin after asking not to.
+  const fresh = Model.defaultConfig()
+  assert.deepEqual(fresh.profiles[0].assignments, {})
+  assert.ok(Model.isBuiltin(fresh.profiles[0].fallback))
+
+  for (let w = 1; w <= 10; w++) {
+    assert.equal(Model.layoutIdForWorkspace(fresh, w), "dwindle", `workspace ${w}`)
+  }
+
+  const lua = Model.generateLua(fresh, [1, 4, 7])
+  assert.ok(!lua.includes('"lua:omarchy-wsl-'), "no workspace may still point at a plugin layout")
+})
+
+test("restoring defaults is wired to a two-press button", () => {
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  assert.match(qml, /function restoreDefaults\(\)/)
+  assert.match(qml, /store\.save\(Model\.defaultConfig\(\)\)/)
+  // Guarded by the same arm-then-confirm as the delete buttons, and Escape
+  // disarms so a primed reset cannot outlive the panel.
+  assert.match(qml, /root\.armDelete\("restore"\)\) root\.restoreDefaults\(\)/)
+  assert.match(qml, /if \(root\.armedDelete !== ""\) root\.armedDelete = ""/)
+})
+
 test("a corrupt config is repaired rather than rejected", () => {
   for (const input of [null, undefined, 42, "nonsense", [], { layouts: "no" }]) {
     const config = Model.normalizeConfig(input)

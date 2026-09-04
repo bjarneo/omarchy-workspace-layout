@@ -40,6 +40,7 @@ Panel {
 
   // Two-step destructive actions: the first press arms, the second commits.
   property string armedDelete: ""
+  readonly property bool armedRestore: armedDelete === "restore"
 
   property string newProfileDraft: ""
   property bool creatingProfile: false
@@ -332,6 +333,19 @@ Panel {
     sync.sync()
   }
 
+  // The way back from an experiment that went sideways: the shipped preset
+  // library, one profile, every workspace handed back to Hyprland. It resets
+  // the plugin's own document only — the generated Lua and the loader line stay
+  // put, so this is a reset rather than a half-uninstall.
+  function restoreDefaults() {
+    store.save(Model.defaultConfig())
+    assignTarget = "workspace"
+    focusedDivider = 0
+    armedDelete = ""
+    creatingProfile = false
+    sync.sync()
+  }
+
   function armDelete(key) {
     if (armedDelete === key) return true
     armedDelete = key
@@ -462,7 +476,8 @@ Panel {
       }
 
       onCloseRequested: {
-        if (root.creatingProfile) root.creatingProfile = false
+        if (root.armedDelete !== "") root.armedDelete = ""
+        else if (root.creatingProfile) root.creatingProfile = false
         else if (root.showKeys) root.showKeys = false
         else root.close()
       }
@@ -481,6 +496,7 @@ Panel {
         else if (key === "f") root.toggleUnderfill()
         else if (key === "0") root.resetWeights()
         else if (key === "?") root.showKeys = !root.showKeys
+        else if (key === "R") { if (root.armDelete("restore")) root.restoreDefaults() }
         else if (key >= "1" && key <= "8") root.focusedDivider = parseInt(key, 10) - 1
       }
 
@@ -1020,6 +1036,35 @@ Panel {
           onAccepted: root.createProfile(text)
         }
 
+        // -------------------------------------------------------- footer
+
+        PanelSeparator { foreground: root.fg }
+
+        Item {
+          width: parent.width
+          height: restoreButton.implicitHeight
+
+          // Right-aligned and quiet: it undoes everything in the panel above
+          // it, so it should be findable without inviting a stray click. Two
+          // presses to fire, like the delete buttons.
+          Button {
+            id: restoreButton
+            anchors.right: parent.right
+            foreground: root.armedRestore ? Color.urgent : Util.alpha(root.fg, 0.55)
+            accent: root.armedRestore ? Color.urgent : root.accent
+            bordered: root.armedRestore
+            fontSize: Style.font.caption
+            verticalPadding: Style.spacing.xs
+            text: root.armedRestore
+              ? "Discard all layouts and profiles?"
+              : "Restore defaults"
+            tooltipText: "Back to the shipped layouts, one profile, every workspace on Hyprland's own tiling"
+            onClicked: {
+              if (root.armDelete("restore")) root.restoreDefaults()
+            }
+          }
+        }
+
         // ---------------------------------------------------------- keys
 
         Rectangle {
@@ -1049,7 +1094,8 @@ Panel {
                 "r         columns ⇄ rows",
                 "o         where extra windows go",
                 "f         with fewer windows: keep place or rescale",
-                "0         split evenly"
+                "0         split evenly",
+                "R  R      restore defaults (press twice)"
               ]
 
               Text {

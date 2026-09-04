@@ -96,6 +96,12 @@ the current one so you can diverge from a shape you like.
 per-workspace exception. Switch and every workspace re-tiles at once. `＋` copies
 the current profile under a new name.
 
+**Restore defaults** at the foot of the panel is the way back from an experiment
+that went sideways: the shipped layouts, one profile, every workspace handed
+back to Hyprland's own tiling. It takes two presses, and `Esc` cancels a primed
+one. Your config file is rewritten, not deleted — the plugin stays installed and
+the generated Lua stays where it is.
+
 Editing a layout edits it everywhere it is used. Duplicate first if you want one
 workspace to differ.
 
@@ -114,6 +120,7 @@ Press `?` in the panel for this list.
 | `o` | where extra windows go |
 | `f` | with fewer windows: keep place or rescale |
 | `0` | split evenly |
+| `R` `R` | restore defaults (twice) |
 | `Esc` | close |
 
 ### A keybinding
