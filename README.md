@@ -17,6 +17,20 @@ property of the workspace rather than a resize you have to redo every time a
 window opens. Close a window and the rest reflow into the shape. Open a fifth
 one and it stacks where you said extras should go.
 
+## Requirements
+
+| Needs | Why |
+| --- | --- |
+| Omarchy (Quattro plugin runtime) | the bar widget and panel are Quickshell QML loaded by `omarchy-shell` |
+| Hyprland 0.55 or newer | `hl.layout.register`, the Lua layout API the whole plugin is built on |
+| `hyprctl` | on `PATH`; how layouts and workspace rules are applied |
+
+No other runtime, package, background service, network access, or privileged
+command. Everything ships in this repository: the panel is QML, the layout
+engine is Lua generated from `Model.js`, and there is no compiled component.
+
+Built and tested against Hyprland 0.56.2 on Omarchy 4.0.2.
+
 ## Install
 
 ```bash
@@ -148,8 +162,6 @@ checks the file exists first, so leaving it does no harm. Workspaces return to
   named and saved, which the mouse gesture never was.
 - **Integer workspaces only.** Named and special workspaces (`special:scratchpad`)
   are left alone, because a rule keyed by name would not survive a rename.
-- **Needs Hyprland 0.55+** for `hl.layout.register`. Built and tested against
-  0.56.2 on Omarchy 4.0.2.
 
 ## Development
 
