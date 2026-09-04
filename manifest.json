@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "bjarneo.workspace-layout",
+  "name": "Workspace Layout",
+  "version": "1.0.0",
+  "author": "Bjarne Oeverli",
+  "license": "MIT",
+  "description": "Decide how a Hyprland workspace splits its screen. Drag the dividers and the real windows move under your cursor — 25/50/25, a 60/40 master, thirds, a grid, or anything you drag to. Layouts are named and reusable, workspaces pick the layout they want, and profiles switch every workspace at once for work, writing, or review.",
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Workspace Layout",
+    "description": "Live tiling ratios per workspace, with saveable layout profiles.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

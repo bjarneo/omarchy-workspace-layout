@@ -1,0 +1,34 @@
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The layout geometry exists twice — once in JavaScript for the panel
+      # preview, once in Lua for Hyprland. tests/model.test.js runs the
+      # generated Lua through the real interpreter and diffs the two, so the
+      # interpreter has to be here or the most important test silently skips.
+      - name: Install Lua
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
+
+      - name: Model tests
+        run: node --test tests/model.test.js
+
+      - name: Manifest
+        run: |
+          jq -e '.schemaVersion == 1' manifest.json
+          jq -e '.id | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")' manifest.json
+          for entry in $(jq -r '.entryPoints[]' manifest.json); do
+            test -f "$entry" || { echo "missing entry point: $entry"; exit 1; }
+          done
