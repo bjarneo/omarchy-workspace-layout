@@ -137,7 +137,13 @@ that has no window yet — press it after a reboot and the workspace furnishes
 itself, each app landing in the slot you gave it. Apps already running are left
 alone, and so is anything the machine has no launcher for.
 
-**Right-click a slot** for what to do with the place rather than the app:
+**Cut a place in two** without leaving the canvas: hover a tile and two arrows
+appear in its corner — `↔` puts another slot beside it, `↕` cuts it into a top
+and a bottom. In a rows layout the arrows swap, because they are named for what
+you will see rather than for the layout's grain. The new place is aimed at
+straight away, so the app that belongs there is the next thing you click.
+
+**Right-click a slot** for the rest of what can be done to a place:
 
 | Option | Does |
 | --- | --- |

@@ -786,6 +786,22 @@ Panel {
     appSearch.forceActiveFocus()
   }
 
+  // Cut the place under the cursor, from the buttons on the tile itself. The
+  // menu runs the same two operations; this is the shortcut for the edit that
+  // gets made most.
+  function splitPlace(slot, direction) {
+    var at = slotPosition(slot)
+    if (at < 0) return
+    editSelectedLayout(function(layout) {
+      var shape = direction === "across"
+        ? Model.shapeSplitAcross(layout.weights, layout.cells, at, 2)
+        : Model.shapeSplitAlong(layout.weights, layout.cells, at, 2)
+      layout.weights = shape.weights
+      layout.cells = shape.cells
+    })
+    aimNewPlace(direction, at)
+  }
+
   // Carry one tile onto another and the two places exchange their apps. The
   // windows follow on the next re-tile of that workspace, which is immediate
   // when you are looking at it.
@@ -1594,6 +1610,7 @@ Panel {
             onSlotMenuRequested: function(slot, x, y) { root.openSlotMenu(slot, x, y) }
             onCellWeightsChanged: function(slot, parts) { root.stageCells(slot, parts) }
             onPlacesSwapped: function(from, to) { root.swapPlaces(from, to) }
+            onSplitRequested: function(slot, direction) { root.splitPlace(slot, direction) }
             }
 
             // A workspace on a Hyprland built-in has nothing to edit, so say what

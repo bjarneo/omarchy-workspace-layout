@@ -1366,6 +1366,41 @@ test("a slot can be split across the grain as well as along it", () => {
   )
 })
 
+test("a divider handle sits on the seam it moves", () => {
+  // "extra → new slots" appends places, which takes room from everything
+  // else: the stored 70 is drawn at 53.8 with three windows. Placed by the
+  // stored number, the handle floats away from the seam and the drag moves it
+  // by some other amount again.
+  const extend = Model.normalizeLayout({ id: "x", weights: [70, 30], overflow: "extend" })
+  assert.equal(Model.dividerScale(extend, 2), 1)
+  assert.equal(Math.round(70 * Model.dividerScale(extend, 3) * 10) / 10, 53.8)
+  assert.equal(Math.round(70 * Model.dividerScale(extend, 4) * 10) / 10, 43.8)
+  // And that is where the rects actually put it.
+  const seam = Model.slotRects(extend, 3)[0]
+  assert.equal(Math.round((seam.x + seam.w) * 1000) / 10, 53.8)
+
+  // Stacking and holding leave the stored edges where they are.
+  assert.equal(Model.dividerScale(Model.normalizeLayout({ id: "y", weights: [70, 30] }), 5), 1)
+  assert.equal(Model.dividerScale(Model.normalizeLayout({ id: "g", kind: "grid" }), 5), 1)
+
+  const canvas = fs.readFileSync(path.join(__dirname, "..", "LayoutCanvas.qml"), "utf8")
+  assert.match(canvas, /readonly property real dividerScale/)
+  // Placed through the scale, and dragged back through it.
+  assert.match(canvas, /\(root\.dividers\[handle\.index\] \|\| 0\) \* root\.dividerScale \/ 100/)
+  assert.match(canvas, /var position = drawn \/ Math\.max\(0\.01, root\.dividerScale\)/)
+})
+
+test("a place can be cut in two from the tile itself", () => {
+  const canvas = fs.readFileSync(path.join(__dirname, "..", "LayoutCanvas.qml"), "utf8")
+  assert.match(canvas, /signal splitRequested\(int slot, string direction\)/)
+  // Named by what the user will see: in a rows layout the arrows swap.
+  assert.match(canvas, /glyph: root\.horizontal \? "\\u2194" : "\\u2195"/)
+
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  assert.match(qml, /function splitPlace\(slot, direction\)/)
+  assert.match(qml, /onSplitRequested: function\(slot, direction\) \{ root\.splitPlace\(slot, direction\) \}/)
+})
+
 test("the canvas offers a handle for a cross-grain divider", () => {
   const canvas = fs.readFileSync(path.join(__dirname, "..", "LayoutCanvas.qml"), "utf8")
   assert.match(canvas, /signal cellWeightsChanged\(int slot, var parts\)/)

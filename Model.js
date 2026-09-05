@@ -216,6 +216,25 @@ function evenWeights(count) {
   return repairSum(out)
 }
 
+// What is drawn and what is stored are the same thing until "extra → new
+// slots" appends places: those take room from everything else, so every stored
+// edge lands somewhere else on screen. The appended slots scale the rest
+// uniformly, so one factor converts between the two — drawn = stored × scale.
+//
+// Without it the divider handle floats away from the seam it belongs to: a
+// 70/30 with a third window draws its edge at 53.8% while the handle sits at
+// 70%, and dragging moves the seam by some other amount again.
+function dividerScale(layout, windowCount) {
+  var spec = normalizeLayout(layout)
+  if (spec.kind === "grid" || spec.overflow !== "extend") return 1
+  var n = Math.max(0, Math.round(Number(windowCount) || 0))
+  var base = totalCells(spec.cells)
+  if (n <= base) return 1
+  var extra = (n - base) * spec.weights[spec.weights.length - 1]
+  if (extra <= 0) return 1
+  return 100 / (100 + extra)
+}
+
 // Cumulative edges between slots — what the user actually grabs in the canvas.
 // A layout with k slots has k-1 dividers.
 function dividerPositions(weights) {
@@ -2208,6 +2227,7 @@ if (typeof module !== "undefined") {
     defaultUnderfill: defaultUnderfill,
     evenWeights: evenWeights,
     dividerPositions: dividerPositions,
+    dividerScale: dividerScale,
     setDivider: setDivider,
     addSlot: addSlot,
     removeSlot: removeSlot,

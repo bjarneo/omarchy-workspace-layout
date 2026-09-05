@@ -41,6 +41,9 @@ Item {
   signal cellWeightsChanged(int slot, var parts)
   // Hold a tile and drop it on another: the two places exchange their apps.
   signal placesSwapped(int from, int to)
+  // The two ways to cut the place under the cursor, without going through a
+  // menu: "along" is another slot beside it, "across" is another part of it.
+  signal splitRequested(int slot, string direction)
 
   readonly property var spec: Model.normalizeLayout(root.layout)
   readonly property bool isRatio: spec.kind !== "grid"
@@ -57,6 +60,12 @@ Item {
   readonly property int drawnCount: Math.max(1, Math.max(root.windowCount, root.isRatio ? root.placeCount : 1))
   readonly property var rects: Model.slotRects(root.spec, root.drawnCount)
   readonly property var dividers: root.isRatio ? Model.dividerPositions(root.spec.weights) : []
+
+  // Drawn and stored are the same until "extra → new slots" appends places,
+  // which moves every stored edge on screen. Handles are placed through this
+  // and drags are converted back through it, so a handle is always on the seam
+  // it moves.
+  readonly property real dividerScale: Model.dividerScale(root.spec, root.drawnCount)
 
   // Which slot of the layout each drawn tile belongs to, by position.
   readonly property var rectSlots: Model.rectSlotPositions(root.spec, root.drawnCount)
@@ -256,6 +265,54 @@ Item {
             }
           }
 
+          // The two cuts, on the tile itself. The menu has them too, but a
+          // shape is fiddled with far more often than it is configured, and
+          // right-clicking for every split is a lot of right-clicking.
+          Row {
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: Style.spacing.xxs
+            spacing: Style.spacing.xxs
+            visible: root.editable && tileHover.hovered && root.carrying === 0
+              && tile.width > Style.space(52) && tile.height > Style.space(34)
+
+            Repeater {
+              model: [
+                { key: "along", glyph: root.horizontal ? "\u2194" : "\u2195" },
+                { key: "across", glyph: root.horizontal ? "\u2195" : "\u2194" }
+              ]
+
+              Rectangle {
+                id: cutButton
+                required property var modelData
+
+                width: Style.space(18)
+                height: Style.space(18)
+                radius: Style.cornerRadius
+                color: cutHover.hovered
+                  ? Util.alpha(root.accent, 0.85)
+                  : Util.alpha(root.foreground, 0.18)
+
+                Text {
+                  anchors.centerIn: parent
+                  textFormat: Text.PlainText
+                  text: cutButton.modelData.glyph
+                  color: cutHover.hovered ? Color.popups.background : root.foreground
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+
+                HoverHandler { id: cutHover }
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.splitRequested(tile.index + 1, cutButton.modelData.key)
+                }
+              }
+            }
+          }
+
           // The percentage is the number the user is actually steering, so it
           // sits in the tile rather than in a legend somewhere else. Names of
           // the apps that live here go under it: the tile is the answer to
@@ -338,7 +395,8 @@ Item {
         id: handle
         required property int index
 
-        readonly property real fraction: (root.dividers[handle.index] || 0) / 100
+        readonly property real fraction:
+          (root.dividers[handle.index] || 0) * root.dividerScale / 100
         readonly property bool hot: hover.hovered || root.activeDivider === handle.index
 
         // The grab area is deliberately wider than the line it draws: a 1px
@@ -385,9 +443,12 @@ Item {
           onPositionChanged: function(mouse) {
             if (root.activeDivider !== handle.index) return
             var point = mapToItem(stage, mouse.x, mouse.y)
-            var position = root.horizontal
+            var drawn = root.horizontal
               ? point.x / Math.max(1, stage.width) * 100
               : point.y / Math.max(1, stage.height) * 100
+            // Back into the space the weights are written in, so the seam
+            // lands under the cursor whatever the overflow rule is doing.
+            var position = drawn / Math.max(0.01, root.dividerScale)
             // Holding Shift turns snapping off for the rare layout that wants
             // 47% and means it.
             var snap = !(mouse.modifiers & Qt.ShiftModifier)
