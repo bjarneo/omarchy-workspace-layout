@@ -929,8 +929,7 @@ test("gathering an app that is already running asks by class, not by pattern",
 test("pinning an app is wired to a click and brings its open windows along", () => {
   const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
   assert.match(qml, /function pinApp\(match, name\)/)
-  assert.match(qml, /var pin = \{ workspace: workspace, slots: next \}/)
-  assert.match(qml, /target\.pins\[clean\] = pin/)
+  assert.match(qml, /root\.writePin\(draft, clean, \{ workspace: workspace, slots: next/)
   // Aiming at a tile an app already holds takes that one back.
   assert.match(qml, /if \(at === -1\) next\.push\(slot\)/)
   // A window rule only fires on open, so without the gather a pin would do
@@ -1188,13 +1187,33 @@ test("a pin can carry the name its class cannot", () => {
   assert.equal(Model.searchApps(config, 3, [], "").rows[0].name, "Discord")
 })
 
+test("every pin write carries what the pin already remembered", () => {
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  // One writer, so no path can drop the command by forgetting to copy it.
+  // Losing it unlaunches the app silently: nothing else on the machine knows
+  // how to open a window called `omarchy.wsl.nvim`.
+  assert.match(qml, /function writePin\(draft, match, changes\)/)
+  assert.match(qml, /var command = changes\.command \|\| previous\.command \|\| ""/)
+  for (const caller of [
+    /root\.writePin\(draft, clean, \{ workspace: workspace, slots: next/,
+    /root\.writePin\(draft, match, \{ workspace: String\(workspace\), slots: slots \}\)/,
+    /root\.writePin\(draft, match, \{ workspace: key, slots: shot\.pins\[match\] \}\)/,
+    /root\.writePin\(draft, to, next\)/
+  ]) {
+    assert.match(qml, caller)
+  }
+  // And nothing writes a pin behind its back.
+  const writes = qml.match(/target\.pins\[[a-z]+\] = /g) || []
+  assert.equal(writes.length, 1, "a pin is written in one place")
+})
+
 test("the panel corrects a pin from what the launch opened", () => {
   const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
   assert.match(qml, /function adoptLaunched\(classes\)/)
   assert.match(qml, /function rewritePin\(from, to, command\)/)
   // The command goes with the class it produced, or the app could never be
   // started again under the name it now answers to.
-  assert.match(qml, /if \(carried !== ""\) next\.command = carried/)
+  assert.match(qml, /command: command \|\| pin\.command \|\| ""/)
   // The rule is installed too late for the window that taught us the class.
   assert.match(qml, /sync\.gather\(to, workspace\)/)
   // And the watch outlives the panel: an app can take a few seconds to appear.

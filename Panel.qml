@@ -430,17 +430,32 @@ Panel {
     sync.sync()
   }
 
+  // The one place a pin is written. Everything a pin remembers that the caller
+  // did not mention is carried over — the readable name, and the command that
+  // produced its window. Losing the command silently unlaunches the app: no
+  // desktop entry mentions `omarchy.wsl.nvim`, so nothing else knows how to
+  // start it, and the workspace quietly has nothing to open.
+  function writePin(draft, match, changes) {
+    var target = Model.findProfile(draft, draft.activeProfile)
+    if (!target) return
+    if (!target.pins) target.pins = ({})
+    var previous = target.pins[match] || {}
+    var pin = {
+      workspace: changes.workspace !== undefined ? changes.workspace : previous.workspace,
+      slots: changes.slots !== undefined ? changes.slots : (previous.slots || [])
+    }
+    var name = changes.name || previous.name || ""
+    var command = changes.command || previous.command || ""
+    if (name !== "") pin.name = name
+    if (command !== "") pin.command = command
+    target.pins[match] = pin
+  }
+
   // Pin an app to a workspace and a set of places, without the aiming the
   // panel does. What `pin` on the command line does.
   function setPin(match, workspace, slots) {
     store.mutate(function(draft) {
-      var target = Model.findProfile(draft, draft.activeProfile)
-      if (!target) return
-      if (!target.pins) target.pins = ({})
-      var previous = target.pins[match]
-      var pin = { workspace: String(workspace), slots: slots }
-      if (previous && previous.name) pin.name = previous.name
-      target.pins[match] = pin
+      root.writePin(draft, match, { workspace: String(workspace), slots: slots })
     })
     refreshAppState()
     sync.sync()
@@ -481,10 +496,7 @@ Panel {
         if (at === -1) next.push(slot)
         else next.splice(at, 1)
       }
-      var pin = { workspace: workspace, slots: next }
-      var carried = label || (previous ? previous.name : "")
-      if (carried) pin.name = carried
-      target.pins[clean] = pin
+      root.writePin(draft, clean, { workspace: workspace, slots: next, name: label || "" })
     })
     appQuery = ""
     appSearch.text = ""
@@ -600,14 +612,16 @@ Panel {
       if (!target || !target.pins || !target.pins[from]) return
       var pin = target.pins[from]
       workspace = pin.workspace
-      var next = { workspace: pin.workspace, slots: pin.slots, name: pin.name || from }
-      // The command goes with the class it produced. For a terminal app that
-      // is the only record of how to make such a window again: no desktop
-      // entry mentions `omarchy.wsl.nvim`.
-      var carried = command || pin.command || ""
-      if (carried !== "") next.command = carried
+      // The command goes with the class it produced: for a terminal app that
+      // is the only record of how to make such a window again.
+      var next = {
+        workspace: pin.workspace,
+        slots: pin.slots,
+        name: pin.name || from,
+        command: command || pin.command || ""
+      }
       delete target.pins[from]
-      target.pins[to] = next
+      root.writePin(draft, to, next)
     })
     if (workspace === "") return
     refreshAppState()
@@ -713,12 +727,10 @@ Panel {
       if (!target) return
       target.assignments[key] = id
       if (!target.pins) target.pins = ({})
+      // Keep whatever a learned pin was carrying: its name, and the command
+      // that is the only record of how to open it.
       for (var match in shot.pins) {
-        var previous = target.pins[match]
-        var pin = { workspace: key, slots: shot.pins[match] }
-        // Keep the readable name a learned pin was carrying.
-        if (previous && previous.name) pin.name = previous.name
-        target.pins[match] = pin
+        root.writePin(draft, match, { workspace: key, slots: shot.pins[match] })
       }
     })
     if (String(selectedWorkspace) === key) assignTarget = "workspace"
