@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .DS_Store
+
+# Scratch notes, not part of the plugin
+ideas.md

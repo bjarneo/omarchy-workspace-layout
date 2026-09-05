@@ -18,9 +18,11 @@ Item {
   property int windowCount: 0
 
   readonly property var spec: Model.normalizeLayout(root.layout)
+  // Places, not slots: a chip for a layout with a split slot has to show the
+  // split, or the picture disagrees with the canvas that drew it.
   readonly property int drawnCount: root.windowCount > 0
     ? root.windowCount
-    : (root.spec.kind === "grid" ? 4 : root.spec.weights.length)
+    : (root.spec.kind === "grid" ? 4 : Model.totalCells(root.spec.cells))
   readonly property var rects: Model.slotRects(root.spec, Math.max(1, root.drawnCount))
 
   // A hairline reads as grey rather than as a line once it is this small, so
@@ -28,10 +30,14 @@ Item {
   readonly property int hairline: Math.max(1, Math.round(Style.space(1)))
 
   Repeater {
-    model: root.rects
+    // A count, not the array, so a drag updates the tiles it already has
+    // instead of building new ones sixty times a second.
+    model: root.rects.length
 
     Rectangle {
-      required property var modelData
+      required property int index
+
+      readonly property var modelData: root.rects[index]
 
       x: Math.round(modelData.x * root.width)
       y: Math.round(modelData.y * root.height)

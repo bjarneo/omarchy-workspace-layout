@@ -24,6 +24,11 @@ Item {
   property var config: null
   property var workspaceIds: []
 
+  // Which monitor each workspace is on, keyed by workspace id as a string. A
+  // monitor default resolves per workspace, so moving a workspace to another
+  // screen changes what it tiles with.
+  property var workspaceMonitors: ({})
+
   // Both the panel and the optional service mount one of these. If both are
   // live they each read hyprland.lua and append to the text they read, so the
   // worst a race produces is the same single line written twice over.
@@ -44,7 +49,7 @@ Item {
 
   function sync() {
     if (!config) return
-    var lua = Model.generateLua(config, root.workspaceIds)
+    var lua = Model.generateLua(config, root.workspaceIds, root.workspaceMonitors)
     luaFile.setText(lua)
     evaluate(lua)
     synced()
@@ -101,6 +106,48 @@ Item {
     // Latest-wins: a drag produces frames faster than hyprctl round-trips, and
     // every intermediate position is already stale by the time it would run.
     onExited: root.flushPreview()
+  }
+
+  // ------------------------------------------------------------------ gather
+  //
+  // A window rule only fires when a window opens, so an app that is already
+  // running would ignore a pin until it was restarted. This brings its windows
+  // over once, at the moment the pin is made.
+  //
+  // Its own process rather than the sync queue above: that one is latest-wins,
+  // and a pin fires a sync and a gather back to back, so sharing it would drop
+  // one of the two.
+  property var pendingGathers: []
+
+  function gather(match, workspaceId) {
+    var lua = Model.gatherAppLua(match, workspaceId)
+    if (lua === "") return
+    pendingGathers = pendingGathers.concat([lua])
+    if (!gatherProcess.running) flushGather()
+  }
+
+  function flushGather() {
+    if (pendingGathers.length === 0) return
+    var next = pendingGathers[0]
+    // Queued, not latest-wins: each payload is a different app, so a dropped
+    // one is an app that never came home.
+    pendingGathers = pendingGathers.slice(1)
+    gatherProcess.command = Model.hyprctlEvalArgs(next)
+    gatherProcess.running = true
+  }
+
+  Process {
+    id: gatherProcess
+    onExited: root.flushGather()
+  }
+
+  // Launching goes through the same one-shot queue: it is the same kind of
+  // work — a payload that acts once and returns nothing.
+  function launch(command, workspaceId) {
+    var lua = Model.launchAppLua(command, workspaceId)
+    if (lua === "") return
+    pendingGathers = pendingGathers.concat([lua])
+    if (!gatherProcess.running) flushGather()
   }
 
   // ------------------------------------------------------------------ files

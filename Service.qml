@@ -27,6 +27,18 @@ Item {
     return ids
   }
 
+  // A monitor default resolves per workspace, so the sync needs to know where
+  // each workspace currently lives.
+  readonly property var workspaceMonitors: {
+    var out = ({})
+    var values = Hyprland.workspaces ? Hyprland.workspaces.values : []
+    for (var i = 0; i < values.length; i++) {
+      var monitor = values[i].monitor
+      if (values[i].id > 0 && monitor) out[String(values[i].id)] = String(monitor.name || "")
+    }
+    return out
+  }
+
   ConfigStore {
     id: store
     onRevisionChanged: syncTimer.restart()
@@ -36,6 +48,7 @@ Item {
     id: sync
     config: store.config
     workspaceIds: root.workspaceIds
+    workspaceMonitors: root.workspaceMonitors
     manageLoader: true
   }
 
@@ -50,6 +63,7 @@ Item {
   }
 
   onWorkspaceIdsChanged: if (store.ready) syncTimer.restart()
+  onWorkspaceMonitorsChanged: if (store.ready) syncTimer.restart()
 
   Component.onCompleted: sync.ensureLoader()
 }
