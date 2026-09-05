@@ -1127,6 +1127,98 @@ test("an app pinned to three places wants three windows", () => {
   assert.equal(Model.missingCount(Model.missingApps(config, 9, catalog, {})), 4)
 })
 
+test("a marked workspace opens itself, and only what it is short of", () => {
+  const config = Model.normalizeConfig({
+    profiles: [{
+      name: "d",
+      fallback: "dwindle",
+      pins: { foot: { workspace: 9, slots: [1, 2] }, signal: 9, firefox: 3 },
+      autostart: [9, 3]
+    }],
+    activeProfile: "d"
+  })
+  const catalog = [
+    { match: "foot", name: "Foot", command: "foot" },
+    { match: "signal", name: "Signal", command: "signal-desktop" },
+    { match: "firefox", name: "Firefox", command: "firefox" }
+  ]
+
+  // Grouped by workspace, because the rule that puts each window in its place
+  // is keyed by where it is going.
+  const cold = Model.autostartPlan(config, catalog, {})
+  assert.deepEqual(cold.map((group) => group.workspace), ["3", "9"])
+  assert.deepEqual(cold[1].apps.map((a) => a.name + "x" + a.count), ["Footx2", "Signalx1"])
+
+  // A session that came back with half its windows open gets the other half,
+  // and a workspace with nothing missing is not in the plan at all.
+  const warm = Model.autostartPlan(config, catalog, { 3: { firefox: 1 }, 9: { foot: 1 } })
+  assert.deepEqual(warm.map((group) => group.workspace), ["9"])
+  assert.deepEqual(warm[0].apps.map((a) => a.name + "x" + a.count), ["Footx1", "Signalx1"])
+
+  // Pinned but not marked is the default: nothing opens by itself.
+  const quiet = Model.normalizeConfig({
+    profiles: [{ name: "d", fallback: "dwindle", pins: { firefox: 3 } }],
+    activeProfile: "d"
+  })
+  assert.deepEqual(Model.autostartPlan(quiet, catalog, {}), [])
+})
+
+test("the workspaces that open at login are the profile's own", () => {
+  // Written by hand, in whatever shape the hand felt like: numbers, strings,
+  // duplicates, and ids no workspace can have.
+  const profile = Model.normalizeProfile({ name: "d", autostart: [9, "3", 3, 0, 200, "x"] }, [])
+  assert.deepEqual(profile.autostart, ["3", "9"])
+  assert.deepEqual(Model.normalizeProfile({ name: "d" }, []).autostart, [])
+  assert.deepEqual(Model.normalizeProfile({ name: "d", autostart: "yes" }, []).autostart, [])
+
+  // The pins belong to the profile, so this does too: a focus profile can
+  // furnish a workspace the default profile leaves empty.
+  const config = Model.normalizeConfig({
+    profiles: [
+      { name: "default", fallback: "dwindle", pins: { firefox: 9 } },
+      { name: "focus", fallback: "dwindle", pins: { firefox: 9 }, autostart: [9] }
+    ],
+    activeProfile: "default"
+  })
+  assert.equal(Model.isAutostart(config, 9), false)
+  const focused = Object.assign({}, config, { activeProfile: "focus" })
+  assert.equal(Model.isAutostart(focused, 9), true)
+
+  // One button, so one toggle.
+  assert.deepEqual(Model.toggledAutostart(["9"], 3), ["3", "9"])
+  assert.deepEqual(Model.toggledAutostart(["3", "9"], "9"), ["3"])
+  assert.deepEqual(Model.toggledAutostart(["9"], 0), ["9"])
+
+  // Releasing a workspace's apps releases the mark with them.
+  assert.deepEqual(Model.withoutAutostart(["3", "9"], 9), ["3"])
+  assert.deepEqual(Model.withoutAutostart(["3"], 9), ["3"])
+  const panel = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  assert.equal(
+    (panel.match(/target\.autostart = Model\.withoutAutostart\(target\.autostart, key\)/g) || []).length,
+    2, "handing a workspace back and clearing its apps both drop the mark")
+
+  // And it is visible to a script without reading the file.
+  assert.match(Model.statusLine(focused, 9, ""), /opens at login/)
+  assert.ok(!/opens at login/.test(Model.statusLine(focused, 8, "")))
+  const state = Model.stateJson(focused, {}, [9])
+  assert.equal(state.workspaces.find((w) => w.workspace === 9).autostart, true)
+})
+
+test("a login furnishes the session once, however many panels are running", () => {
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  // Two monitors mean two copies of the panel, and a shell restart builds
+  // fresh ones mid-session. mkdir is the lock: atomic, and the second caller
+  // fails rather than opening everything twice.
+  assert.match(qml, /mkdir \\"\$d\/autostart-\$\{HYPRLAND_INSTANCE_SIGNATURE/)
+  assert.match(qml, /if \(exitCode === 0\) root\.beginAutostart\(\)/)
+  // What is already open stays open: the plan is built from a fresh read of
+  // the windows, which the panel otherwise only polls while it is on screen.
+  assert.match(qml, /function beginAutostart\(\)[\s\S]{0,120}refreshCounts\(\)/)
+  assert.match(qml, /Model\.autostartPlan\(config, appCatalog, windowsByWorkspace\)/)
+  // Two workspaces is two launches, so the second must not replace the first.
+  assert.match(qml, /pendingLaunches = pendingLaunches\.concat\(waiting\)/)
+})
+
 test("a pin learns the class its launch actually opened", () => {
   // A desktop entry does not have to say what its windows will be called, and
   // a webapp's never does: Omarchy's Discord entry launches Chromium, whose

@@ -175,6 +175,14 @@ Panel {
   property var pendingLaunches: []
   property var launchBaseline: ({})
 
+  // Furnishing the session by itself. `autostartDone` is this copy of the
+  // panel having had its turn — won or lost — and the claim below is what
+  // makes the turn happen once for the machine rather than once per monitor.
+  property bool autostartDone: false
+  property bool autostartWanted: false
+
+  readonly property bool autostartHere: Model.isAutostart(config, selectedWorkspace)
+
   // Everything the search can find: the apps installed on the machine, plus
   // whatever has a window open. Desktop entries come first so an app the
   // machine knows keeps its readable name and its launch command, and a bare
@@ -574,8 +582,6 @@ Panel {
   function launchMissing(workspace, list) {
     if (list.length === 0) return
 
-    var baseline = {}
-    for (var j = 0; j < runningApps.length; j++) baseline[runningApps[j]] = true
     var waiting = []
     for (var i = 0; i < list.length; i++) {
       // One window per place the app was given: an app pinned to three slots
@@ -589,9 +595,41 @@ Panel {
       })
       for (var c = 0; c < wanted; c++) sync.launch(command, workspace)
     }
-    launchBaseline = baseline
-    pendingLaunches = waiting
+    // A second batch joins the first rather than replacing it — a login
+    // furnishing two workspaces is two calls — and the baseline stays what was
+    // on screen before any of them started, so a window opened by the first
+    // batch still reads as fresh for the launch that asked for it.
+    if (pendingLaunches.length === 0) {
+      var baseline = {}
+      for (var j = 0; j < runningApps.length; j++) baseline[runningApps[j]] = true
+      launchBaseline = baseline
+    }
+    pendingLaunches = pendingLaunches.concat(waiting)
     launchWatch.restart()
+  }
+
+  // Whether this workspace furnishes itself at login. Kept on the profile
+  // beside the pins it opens, so switching profiles switches this too.
+  function toggleAutostart(workspace) {
+    store.mutate(function(draft) {
+      var target = Model.findProfile(draft, draft.activeProfile)
+      if (!target) return
+      target.autostart = Model.toggledAutostart(target.autostart, workspace)
+    })
+  }
+
+  // Won the claim: read what is on screen right now — the poll only runs while
+  // the panel is open, and at login it never has been — and furnish from that.
+  function beginAutostart() {
+    autostartWanted = true
+    refreshCounts()
+  }
+
+  // Every marked workspace, each opening only what it is short of. Apps that
+  // survived into this session are left exactly where they are.
+  function furnishSession() {
+    var plan = Model.autostartPlan(config, appCatalog, windowsByWorkspace)
+    for (var i = 0; i < plan.length; i++) root.launchMissing(plan[i].workspace, plan[i].apps)
   }
 
   // What actually opened. A pin whose class was a guess from a desktop entry
@@ -720,6 +758,7 @@ Panel {
           if (target.pins[match].workspace === key) delete target.pins[match]
         }
       }
+      target.autostart = Model.withoutAutostart(target.autostart, key)
     })
     if (String(selectedWorkspace) === key) selectedSlot = 0
     refreshAppState()
@@ -730,10 +769,11 @@ Panel {
     var key = String(workspace)
     store.mutate(function(draft) {
       var target = Model.findProfile(draft, draft.activeProfile)
-      if (!target || !target.pins) return
-      for (var match in target.pins) {
+      if (!target) return
+      for (var match in (target.pins || {})) {
         if (target.pins[match].workspace === key) delete target.pins[match]
       }
+      target.autostart = Model.withoutAutostart(target.autostart, key)
     })
     refreshAppState()
     sync.sync()
@@ -1138,6 +1178,12 @@ Panel {
           var list = Object.keys(apps).sort()
           if (list.join("\u0000") !== root.runningApps.join("\u0000")) root.runningApps = list
           root.adoptLaunched(list)
+          // The login furnishing waits for this: it is the first and only read
+          // of what is already open.
+          if (root.autostartWanted) {
+            root.autostartWanted = false
+            root.furnishSession()
+          }
           // Opening or closing a window changes what the workspace is short
           // of. Never while a divider is moving: rebuilding the rows under a
           // drag is what made dragging feel broken.
@@ -1207,6 +1253,38 @@ Panel {
           // A workspace with nothing tiled on it has nothing to capture.
         }
       }
+    }
+  }
+
+  // Wait for the document, the desktop entries and the terminal probe before
+  // furnishing anything: a launch that runs before the catalogue is built
+  // finds no command for any of its pins and quietly opens nothing.
+  Timer {
+    id: autostartArm
+    interval: 2500
+    repeat: false
+    running: !root.autostartDone && store.ready && !terminalProbe.running
+      && root.appCatalog.length > 0
+    onTriggered: autostartClaim.running = true
+  }
+
+  // Claimed whether or not anything is marked, because what the claim records
+  // is that this session's login moment has passed: ticking the setting an
+  // hour in should arrange the *next* login, not open the apps there and then.
+  //
+  // Once per Hyprland session, not once per panel: two monitors mean two
+  // copies of this file, and `omarchy restart shell` builds fresh ones
+  // mid-session, which must not reopen what the user has since closed. The
+  // directory is the lock — mkdir is atomic and the second caller fails — and
+  // its name carries the instance signature, so the next login starts clean.
+  Process {
+    id: autostartClaim
+    command: ["sh", "-c",
+      "d=\"${XDG_RUNTIME_DIR:-/tmp/omarchy-$(id -u)}/omarchy-workspace-layout\"; " +
+      "mkdir -p \"$d\" && mkdir \"$d/autostart-${HYPRLAND_INSTANCE_SIGNATURE:-session}\" 2>/dev/null"]
+    onExited: function(exitCode, exitStatus) {
+      root.autostartDone = true
+      if (exitCode === 0) root.beginAutostart()
     }
   }
 
@@ -2031,30 +2109,57 @@ Panel {
           }
 
           // One press starts the workspace: everything pinned here that has
-          // nothing on screen yet, each landing in its own place.
-          Button {
-            visible: root.missingApps.length > 0
-            foreground: root.fg
-            accent: root.accent
-            bordered: true
-            fontSize: Style.font.caption
-            verticalPadding: Style.spacing.xs
-            text: {
-              var total = Model.missingCount(root.missingApps)
-              if (root.missingApps.length === 1 && total === 1) {
-                return "\u25b8  Open " + root.missingApps[0].name
+          // nothing on screen yet, each landing in its own place. Beside it,
+          // the setting that makes that press happen at login instead.
+          Flow {
+            width: parent.width
+            spacing: Style.spacing.sm
+            // Nothing to show is not the same as an empty row: a positioner
+            // skips an invisible child, and takes a gap for a visible one that
+            // happens to be empty.
+            visible: root.missingApps.length > 0 || root.pinnedHere.length > 0
+
+            Button {
+              visible: root.missingApps.length > 0
+              foreground: root.fg
+              accent: root.accent
+              bordered: true
+              fontSize: Style.font.caption
+              verticalPadding: Style.spacing.xs
+              text: {
+                var total = Model.missingCount(root.missingApps)
+                if (root.missingApps.length === 1 && total === 1) {
+                  return "\u25b8  Open " + root.missingApps[0].name
+                }
+                return "\u25b8  Open " + total + " windows"
               }
-              return "\u25b8  Open " + total + " windows"
-            }
-            tooltipText: {
-              var names = []
-              for (var i = 0; i < root.missingApps.length; i++) {
-                var app = root.missingApps[i]
-                names.push(app.count > 1 ? app.name + " \u00d7" + app.count : app.name)
+              tooltipText: {
+                var names = []
+                for (var i = 0; i < root.missingApps.length; i++) {
+                  var app = root.missingApps[i]
+                  names.push(app.count > 1 ? app.name + " \u00d7" + app.count : app.name)
+                }
+                return "Open on workspace " + root.selectedWorkspace + ": " + names.join(", ")
               }
-              return "Open on workspace " + root.selectedWorkspace + ": " + names.join(", ")
+              onClicked: root.launchMissing(String(root.selectedWorkspace), root.missingApps)
             }
-            onClicked: root.launchMissing(String(root.selectedWorkspace), root.missingApps)
+
+            Button {
+              // Nothing pinned here, nothing for a login to open.
+              visible: root.pinnedHere.length > 0
+              foreground: root.fg
+              accent: root.accent
+              bordered: true
+              fontSize: Style.font.caption
+              verticalPadding: Style.spacing.xs
+              text: root.autostartHere ? "at login \u2192 open these" : "at login \u2192 nothing"
+              tooltipText: root.autostartHere
+                ? "Workspace " + root.selectedWorkspace +
+                  " opens its apps by itself when you log in. Click to stop."
+                : "Open everything pinned to workspace " + root.selectedWorkspace +
+                  " when you log in, once per session"
+              onClicked: root.toggleAutostart(root.selectedWorkspace)
+            }
           }
 
           Text {

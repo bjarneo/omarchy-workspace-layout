@@ -166,6 +166,23 @@ that has no window yet — press it after a reboot and the workspace furnishes
 itself, each app landing in the slot you gave it. Apps already running are left
 alone, and so is anything the machine has no launcher for.
 
+**Or have it press itself.** Beside that button, `at login → open these` marks
+the workspace as one that starts on its own: a few seconds into the session the
+plugin makes exactly the press you would have made, for every workspace marked
+that way. It happens once per Hyprland session — not again when the shell
+restarts, and not when you tick the box an hour in — and it opens only what is
+missing, so a session that came back with half its windows already up gets the
+other half and nothing more. The mark is a list of workspaces on the profile
+(`"autostart": ["1", "9"]`, and plain numbers are read too), so a `focus`
+profile can furnish a workspace your `default` profile leaves empty.
+
+Nothing is installed anywhere for this: no desktop entries, no unit files, no
+autostart lines. If you would rather drive it yourself, the command line does
+the same press — `omarchy-shell workspace-layout launch 1` — from
+`~/.config/hypr/autostart.lua`, a keybinding, or a script. Waiting a moment is
+the whole trick either way: the command answers on the shell's bus, which is
+not up the instant Hyprland starts.
+
 **Cut a place in two** without leaving the canvas: hover a tile and two arrows
 appear in its corner — `↔` puts another slot beside it, `↕` cuts it into a top
 and a bottom. In a rows layout the arrows swap, because they are named for what
@@ -289,7 +306,8 @@ off centre. A part that is cut again — back along the grain — says so:
 
 a column beside another that is split into a top half and a bottom half, the
 bottom half divided into two. Three levels is the whole model; there is no
-fourth. A profile's `monitors` maps a monitor name to a layout.
+fourth. A profile's `monitors` maps a monitor name to a layout, and its `autostart`
+lists the workspaces that open their pinned apps at login.
 
 An app pin is one line in that JSON: `"firefox": "3"` sends it to workspace 3,
 `"firefox": { "workspace": "3", "slot": 2 }` sends it to the second slot of
@@ -333,6 +351,11 @@ checks the file exists first, so leaving it does no harm. Workspaces return to
 - **Integer workspaces only.** Named and special workspaces (`special:scratchpad`)
   are left alone, because a rule keyed by name would not survive a rename. The
   same goes for an app pin's destination.
+- **Opening at login needs the bar widget.** The launcher lives in the panel,
+  which is loaded whether or not the panel is open — the same reason the
+  command line lives there. A bar-less install running only `Service.qml` keeps
+  its layouts and pins applied but starts nothing; `exec-once` and
+  `workspace-layout launch` still work there.
 - **A pin catches windows as they open.** Pinning an app collects the windows it
   already has once, and after that a window you move somewhere else stays where
   you put it. Switching profiles re-points the rules but does not sweep open

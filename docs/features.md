@@ -17,6 +17,8 @@ Everything the plugin does, in one list.
 - Read names and launch commands from desktop entries
 - One button opens everything the workspace is missing, one window per empty
   place
+- Mark a workspace `at login` and it opens its own apps once per session, with
+  no autostart entries to write
 - Terminal apps like nvim and btop open in your terminal under a class the pin
   can match
 - A pin corrects itself when a launch opens a window under a different class,

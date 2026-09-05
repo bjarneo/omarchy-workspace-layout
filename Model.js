@@ -1081,7 +1081,8 @@ function normalizeProfile(raw, layouts) {
     fallback: fallback,
     assignments: assignments,
     monitors: monitors,
-    pins: pins
+    pins: pins,
+    autostart: normalizeAutostart(input.autostart)
   }
 }
 
@@ -1481,6 +1482,82 @@ function missingCount(missing) {
   var list = (missing instanceof Array) ? missing : []
   for (var i = 0; i < list.length; i++) total += Math.max(1, Number(list[i].count) || 1)
   return total
+}
+
+// ---------------------------------------------------------------- autostart
+
+// Which workspaces open their pinned apps by themselves, as a list of
+// workspace ids on the profile. It belongs to the profile because the pins do:
+// a `focus` profile can furnish workspace 9 that `default` leaves empty.
+//
+// A list rather than a flag per pin: what is being asked for is one press of
+// the workspace's own "open these" button, made once, for the workspace as a
+// whole.
+function normalizeAutostart(value) {
+  var raw = (value instanceof Array) ? value : []
+  var seen = {}
+  var out = []
+  for (var i = 0; i < raw.length; i++) {
+    var id = normalizeWorkspaceId(raw[i])
+    if (id === null || seen[id]) continue
+    seen[id] = true
+    out.push(id)
+  }
+  out.sort(function(a, b) { return Number(a) - Number(b) })
+  return out
+}
+
+function autostartWorkspaces(config) {
+  var profile = activeProfile(config)
+  var list = (profile && profile.autostart instanceof Array) ? profile.autostart : []
+  return list.slice()
+}
+
+function isAutostart(config, workspaceId) {
+  var key = normalizeWorkspaceId(workspaceId)
+  if (key === null) return false
+  return autostartWorkspaces(config).indexOf(key) !== -1
+}
+
+// The setting is a toggle rather than two commands: the panel has one button
+// for it, and the workspace it names is either in the list or not.
+function toggledAutostart(list, workspaceId) {
+  var out = normalizeAutostart(list)
+  var key = normalizeWorkspaceId(workspaceId)
+  if (key === null) return out
+  var at = out.indexOf(key)
+  if (at === -1) out.push(key)
+  else out.splice(at, 1)
+  return normalizeAutostart(out)
+}
+
+// Handing a workspace back, or releasing its apps, releases this with them: a
+// workspace with nothing pinned to it has nothing to open, and a mark left
+// behind would come back to life the next time something was pinned there.
+function withoutAutostart(list, workspaceId) {
+  var out = normalizeAutostart(list)
+  var key = normalizeWorkspaceId(workspaceId)
+  if (key === null) return out
+  var at = out.indexOf(key)
+  if (at !== -1) out.splice(at, 1)
+  return out
+}
+
+// What one login opens. Grouped by workspace because a launch is per
+// workspace — the rule that puts each window in its place is keyed by where it
+// is going — and a workspace with nothing missing is left out, so a session
+// that came back with half its windows already open only gets the other half.
+function autostartPlan(config, catalog, windowsByWorkspace) {
+  var ids = autostartWorkspaces(config)
+  var windows = (windowsByWorkspace && typeof windowsByWorkspace === "object")
+    ? windowsByWorkspace : {}
+  var out = []
+  for (var i = 0; i < ids.length; i++) {
+    var apps = missingApps(config, ids[i], catalog, windows[ids[i]])
+    if (apps.length === 0) continue
+    out.push({ workspace: ids[i], apps: apps })
+  }
+  return out
 }
 
 // ---------------------------------------------------------------- terminals
@@ -2520,6 +2597,7 @@ function statusLine(config, workspaceId, monitorName) {
     }
     parts.push("apps " + apps.join(" "))
   }
+  if (isAutostart(config, key)) parts.push("opens at login")
   return parts.join(" · ")
 }
 
@@ -2543,7 +2621,8 @@ function stateJson(config, workspaceMonitors, liveWorkspaceIds) {
       layout: id,
       name: layout ? layout.name : id,
       builtin: isBuiltin(id),
-      places: layout ? totalCells(layout.cells) : 0
+      places: layout ? totalCells(layout.cells) : 0,
+      autostart: isAutostart(normalized, ids[i])
     })
   }
 
@@ -2714,6 +2793,12 @@ if (typeof module !== "undefined") {
     terminalClassFor: terminalClassFor,
     missingApps: missingApps,
     missingCount: missingCount,
+    normalizeAutostart: normalizeAutostart,
+    autostartWorkspaces: autostartWorkspaces,
+    isAutostart: isAutostart,
+    toggledAutostart: toggledAutostart,
+    withoutAutostart: withoutAutostart,
+    autostartPlan: autostartPlan,
     launchToken: launchToken,
     matchLaunchedWindows: matchLaunchedWindows,
     gatherAppLua: gatherAppLua,

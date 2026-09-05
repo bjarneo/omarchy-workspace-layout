@@ -31,7 +31,8 @@ $ omarchy-shell workspace-layout status
 ```
 
 `from` says *why* a workspace tiles the way it does: its own choice, the
-monitor's default, or the profile falling back.
+monitor's default, or the profile falling back. A workspace marked `at login`
+in the panel says `opens at login` at the end of its line.
 
 ### `workspace <n>`
 
@@ -60,7 +61,7 @@ omarchy-shell workspace-layout json | jq '.workspaces[] | select(.builtin == fal
   "monitors": { "DP-2": "wide-centre" },
   "workspaces": [
     { "workspace": 9, "monitor": "eDP-1", "layout": "even",
-      "name": "Even", "builtin": false, "places": 3 }
+      "name": "Even", "builtin": false, "places": 3, "autostart": true }
   ],
   "layouts": [
     { "id": "even", "name": "Even", "kind": "ratio", "orientation": "columns",
@@ -112,7 +113,8 @@ workspace 3 uses wide-centre
 ### `reset <workspace>`
 
 Hand one workspace back to Hyprland, apps and all — the layout goes, and so do
-the pins aimed at it. The rest of the profile is untouched.
+the pins aimed at it and its `at login` mark. The rest of the profile is
+untouched.
 
 ```
 $ omarchy-shell workspace-layout reset 3
@@ -168,6 +170,16 @@ ones after put the app straight in its place.
 ```
 $ omarchy-shell workspace-layout launch 9
 opening Foot ×3, Signal on workspace 9
+```
+
+This is exactly what the panel's `at login → open these` does for you a few
+seconds into a session. Driving it from Hyprland instead means waiting for the
+shell to come up first — the command answers on its bus — so the panel's own
+setting is the easier of the two:
+
+```lua
+-- ~/.config/hypr/autostart.lua
+o.exec_on_start("sleep 5; omarchy-shell workspace-layout launch 1")
 ```
 
 ## The panel

@@ -215,6 +215,18 @@ passed. Hence `omarchy.wsl.<slug>`, and hence the pin carrying `command`: no
 desktop entry mentions that class, so the pin is the only record of how to make
 such a window again. Established by probing ghostty 1.2 here.
 
+**Opening at login is claimed, not scheduled.** `autostartClaim` runs `mkdir`
+in `$XDG_RUNTIME_DIR`, keyed by `HYPRLAND_INSTANCE_SIGNATURE`, and only the
+process that creates the directory furnishes anything. Two monitors mean two
+copies of `Panel.qml`, and `omarchy restart shell` builds fresh ones
+mid-session — a timer alone would open everything twice on the first and reopen
+what the user had closed on the second. The launch waits on a fresh
+`hyprctl clients` read (`beginAutostart` → `refreshCounts`) because the window
+poll only runs while the panel is open, and it waits on the terminal probe and
+the desktop-entry catalogue, without which a pin has no command to run. It
+lives in `Panel.qml` for the same reason the CLI does: that file is always
+loaded, `Service.qml` is not.
+
 ## The command line
 
 `Panel.qml`'s `IpcHandler` is the whole CLI, and it lives there rather than in
