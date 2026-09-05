@@ -1881,7 +1881,12 @@ Panel {
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 textFormat: Text.PlainText
-                width: Style.space(58)
+                // A floor, not a width. "2 cols" is short enough that a fixed
+                // box keeps the two stepper buttons still while the count
+                // changes; "2 cols \u00b7 3 places" is several times wider than
+                // any such box, and a Text that is centred in a box too small
+                // for it overflows both ends and prints straight over them.
+                width: Math.max(Style.space(58), implicitWidth)
                 horizontalAlignment: Text.AlignHCenter
                 text: {
                   if (!root.selectedLayout) return ""
