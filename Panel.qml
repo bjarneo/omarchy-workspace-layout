@@ -230,6 +230,22 @@ Panel {
     return pinNames[match] || appNames[match] || match
   }
 
+  // Working from the panel, the shape describes what is actually open: a
+  // window past the last place stops being a stack the drawing invents and
+  // becomes a place the layout keeps — with a divider to drag and somewhere to
+  // pin an app. Only for the workspace being edited, and never mid-drag.
+  function growSelectedForWindows() {
+    var layout = selectedLayout
+    if (!layout || layout.kind === "grid" || canvas.dragging) return
+    var windows = selectedWindowCount
+    if (windows <= Model.totalCells(layout.cells)) return
+    editSelectedLayout(function(draft) {
+      var shape = Model.growForCount(draft.weights, draft.cells, draft.overflow, windows)
+      draft.weights = shape.weights
+      draft.cells = shape.cells
+    })
+  }
+
   function refreshAppState() {
     var named = {}
     var all = Model.pinEntries(config)
@@ -253,7 +269,10 @@ Panel {
   }
 
   onAppQueryChanged: refreshAppState()
-  onSelectedWorkspaceChanged: refreshAppState()
+  onSelectedWorkspaceChanged: {
+    refreshAppState()
+    growSelectedForWindows()
+  }
   onRunningAppsChanged: {
     rebuildCatalog()
     refreshAppState()
@@ -389,6 +408,23 @@ Panel {
       for (var i = 0; i < draft.layouts.length; i++) {
         if (draft.layouts[i].id !== edited) continue
         var shape = Model.shapeSetCell(draft.layouts[i].weights, draft.layouts[i].cells, slot, parts)
+        draft.layouts[i].cells = shape.cells
+      }
+    })
+    sync.preview(Model.findLayout(store.config, edited))
+  }
+
+  // And the third level: the divider inside a divided part.
+  function stagePieces(slot, part, pieces) {
+    if (!selectedLayout) return
+    var sourceId = selectedLayout.id
+    var edited = sourceId
+    store.stage(function(draft) {
+      edited = root.forkPreset(draft, sourceId)
+      for (var i = 0; i < draft.layouts.length; i++) {
+        if (draft.layouts[i].id !== edited) continue
+        var shape = Model.shapeSetPiece(draft.layouts[i].weights, draft.layouts[i].cells,
+          slot, part, pieces)
         draft.layouts[i].cells = shape.cells
       }
     })
@@ -798,6 +834,30 @@ Panel {
     appSearch.forceActiveFocus()
   }
 
+  // A place carried onto the edge of another: the target is cut in two, the
+  // carried apps take the half by the edge, and the place they came from is
+  // gone — its room shared out. Shape and pins move together, because the
+  // place numbers the pins are written in are about to change.
+  function dropPlace(from, to, edge) {
+    if (!selectedLayout) return
+    var sourceId = selectedLayout.id
+    var workspace = String(selectedWorkspace)
+    store.mutate(function(draft) {
+      var id = root.forkPreset(draft, sourceId)
+      var layout = Model.findLayout(draft, id)
+      var target = Model.findProfile(draft, draft.activeProfile)
+      if (!layout || !target) return
+      var moved = Model.movePlaceInto(layout, target.pins, workspace, from, to, edge)
+      if (!moved) return
+      layout.weights = moved.weights
+      layout.cells = moved.cells
+      target.pins = moved.pins
+    })
+    selectedSlot = 0
+    refreshAppState()
+    sync.sync()
+  }
+
   // Cut the place under the cursor, from the buttons on the tile itself. The
   // menu runs the same two operations; this is the shortcut for the edit that
   // gets made most.
@@ -1081,7 +1141,10 @@ Panel {
           // Opening or closing a window changes what the workspace is short
           // of. Never while a divider is moving: rebuilding the rows under a
           // drag is what made dragging feel broken.
-          if (!canvas.dragging) root.refreshAppState()
+          if (!canvas.dragging) {
+            root.refreshAppState()
+            root.growSelectedForWindows()
+          }
         } catch (error) {
           root.tiledCounts = ({})
           root.runningApps = []
@@ -1621,8 +1684,10 @@ Panel {
               onSlotClicked: function(slot) { root.selectSlot(slot) }
             onSlotMenuRequested: function(slot, x, y) { root.openSlotMenu(slot, x, y) }
             onCellWeightsChanged: function(slot, parts) { root.stageCells(slot, parts) }
+            onPieceWeightsChanged: function(slot, part, pieces) { root.stagePieces(slot, part, pieces) }
             onPlacesSwapped: function(from, to) { root.swapPlaces(from, to) }
             onSplitRequested: function(slot, direction) { root.splitPlace(slot, direction) }
+            onPlaceDropped: function(from, to, edge) { root.dropPlace(from, to, edge) }
             }
 
             // A workspace on a Hyprland built-in has nothing to edit, so say what

@@ -165,21 +165,37 @@ function normalizeCells(cells, slotCount) {
     var parts = cellParts(list[i])
     // Every slot keeps at least one part, so a layout can always be drawn.
     var room = Math.max(1, MAX_SLOTS - total - (slotCount - i - 1))
-    if (parts.length > room) parts = parts.slice(0, room)
-    out.push(normalizeWeights(parts, parts.length))
-    total += parts.length
+    var kept = []
+    var used = 0
+    for (var j = 0; j < parts.length; j++) {
+      var pieces = partPieces(parts[j])
+      if (used + pieces > room) break
+      kept.push(parts[j])
+      used += pieces
+    }
+    if (kept.length === 0) kept = [100]
+    out.push(balanceParts(kept))
+    total += used > 0 ? used : 1
   }
   return out
 }
 
-// One slot's parts, from either form: a count, or the weights themselves.
+// One slot's parts, from any of the three forms: a count, the cross weights
+// themselves, or — for a part that is divided again along the grain — an
+// object saying how wide it is and how it is cut.
+//
+//   2                          two equal parts
+//   [30, 70]                   two parts, uneven
+//   [50, { weight: 50, parts: [40, 60] }]
+//                              two parts, the second cut into two columns
+//
+// That second cut is the third dimension of a layout that has no nesting
+// beyond it: slots run one way, their parts the other, and a part's own parts
+// the first way again. Deeper than that and the panel would be drawing a tree.
 function cellParts(value) {
   if (value instanceof Array) {
     var out = []
-    for (var i = 0; i < value.length && i < MAX_SLOTS; i++) {
-      var weight = Number(value[i])
-      out.push(isFiniteNumber(weight) && weight > 0 ? weight : 1)
-    }
+    for (var i = 0; i < value.length && i < MAX_SLOTS; i++) out.push(normalizePart(value[i]))
     return out.length > 0 ? out : [100]
   }
   var count = Math.round(Number(value))
@@ -188,10 +204,61 @@ function cellParts(value) {
   return evenWeights(count)
 }
 
+function normalizePart(value) {
+  if (value && typeof value === "object" && value.parts instanceof Array) {
+    var weight = Number(value.weight)
+    var inner = []
+    for (var i = 0; i < value.parts.length && i < MAX_SLOTS; i++) {
+      var piece = Number(value.parts[i])
+      inner.push(isFiniteNumber(piece) && piece > 0 ? piece : 1)
+    }
+    if (inner.length < 2) return isFiniteNumber(weight) && weight > 0 ? weight : 1
+    return {
+      weight: isFiniteNumber(weight) && weight > 0 ? weight : 1,
+      parts: normalizeWeights(inner, inner.length)
+    }
+  }
+  var plain = Number(value)
+  return isFiniteNumber(plain) && plain > 0 ? plain : 1
+}
+
+// The cross-grain weight of a part, whichever form it is in.
+function partWeight(part) {
+  return (part && typeof part === "object") ? part.weight : part
+}
+
+// How a part is cut along the grain, or [] for a part that is not.
+function partSplit(part) {
+  return (part && typeof part === "object" && part.parts instanceof Array) ? part.parts : []
+}
+
+// How many places a part is worth.
+function partPieces(part) {
+  var split = partSplit(part)
+  return split.length > 1 ? split.length : 1
+}
+
+// Normalize the cross weights of a slot's parts to sum to 100, leaving each
+// part's own cut alone.
+function balanceParts(parts) {
+  var weights = []
+  var i
+  for (i = 0; i < parts.length; i++) weights.push(partWeight(parts[i]))
+  weights = normalizeWeights(weights, weights.length)
+  var out = []
+  for (i = 0; i < parts.length; i++) {
+    var split = partSplit(parts[i])
+    out.push(split.length > 1 ? { weight: weights[i], parts: split } : weights[i])
+  }
+  return out
+}
+
 // How many places a layout offers, counting every part of every slot.
 function totalCells(cells) {
   var total = 0
-  for (var i = 0; i < cells.length; i++) total += cells[i].length
+  for (var i = 0; i < cells.length; i++) {
+    for (var j = 0; j < cells[i].length; j++) total += partPieces(cells[i][j])
+  }
   return total
 }
 
@@ -409,6 +476,63 @@ function shapeSplitAcross(weights, cells, index, parts) {
   return { weights: w, cells: out }
 }
 
+// Give the layout enough places for the windows that are actually open, the
+// way its own overflow rule would have drawn them — but written down.
+//
+// Overflow is a drawing rule: five windows in a three-place layout are shown
+// stacked, and the moment one closes the stack is gone. That is fine for a
+// layout you are not looking at, and wrong for one you are arranging: the
+// extra windows have no place to be pinned to, no divider to drag, and no
+// memory of where you put them. Working from the panel, they become places.
+function growForCount(weights, cells, overflow, count) {
+  var w = normalizeWeights(weights)
+  var c = normalizeCells(cells, w.length)
+  var n = Math.round(Number(count))
+  var places = totalCells(c)
+  if (!isFiniteNumber(n) || n <= places || places >= MAX_SLOTS) return { weights: w, cells: c }
+  var extra = Math.min(n, MAX_SLOTS) - places
+
+  if (overflow === "extend") {
+    // New slots as wide as the last, which is what "extra → new slots" drew.
+    var out = w.slice()
+    var parts = c.slice()
+    for (var i = 0; i < extra; i++) {
+      out.push(w[w.length - 1])
+      parts.push([100])
+    }
+    return { weights: normalizeWeights(out, out.length), cells: normalizeCells(parts, out.length) }
+  }
+
+  // Stacked into one slot, evenly, exactly as it was being drawn.
+  var at = overflow === "first" ? 0 : c.length - 1
+  var grown = c.slice()
+  grown[at] = evenCell(grown[at].length + extra)
+  return { weights: w, cells: grown }
+}
+
+// Drag of the divider inside a divided part: its pieces, replaced wholesale.
+// The part keeps its band across the grain; only the split along it moves.
+function shapeSetPiece(weights, cells, index, part, pieces) {
+  var w = normalizeWeights(weights)
+  var c = normalizeCells(cells, w.length)
+  var at = Math.round(Number(index))
+  var which = Math.round(Number(part))
+  if (!isFiniteNumber(at) || at < 0 || at >= c.length) return { weights: w, cells: c }
+  if (!isFiniteNumber(which) || which < 0 || which >= c[at].length) return { weights: w, cells: c }
+  var given = (pieces instanceof Array) ? pieces.length : 0
+  if (given < 2) return { weights: w, cells: c }
+  if (totalCells(c) - partPieces(c[at][which]) + given > MAX_SLOTS) return { weights: w, cells: c }
+
+  var out = c.slice()
+  var parts = out[at].slice()
+  parts[which] = {
+    weight: partWeight(parts[which]),
+    parts: normalizeWeights(pieces, given)
+  }
+  out[at] = parts
+  return { weights: w, cells: out }
+}
+
 // Back to one place: the slot keeps its width and stops being cut up.
 function shapeMerge(weights, cells, index) {
   var w = normalizeWeights(weights)
@@ -423,15 +547,32 @@ function shapeMerge(weights, cells, index) {
 // Drag of a cross-grain divider: one slot's parts, replaced wholesale. The
 // panel hands over what `setDivider` produced, so the maths that moves a
 // divider is the same on both axes.
+//
+// The part count may differ from what is stored, and that is the point: a slot
+// showing three windows because overflow stacked them there has no ratio to
+// drag — dragging its divider is how you say "these are places now", and the
+// stack becomes a split the layout remembers.
 function shapeSetCell(weights, cells, index, parts) {
   var w = normalizeWeights(weights)
   var c = normalizeCells(cells, w.length)
   var at = Math.round(Number(index))
   if (!isFiniteNumber(at) || at < 0 || at >= c.length) return { weights: w, cells: c }
-  var next = normalizeWeights(parts, (parts instanceof Array) ? parts.length : 0)
-  if (next.length !== c[at].length) return { weights: w, cells: c }
+  var given = (parts instanceof Array) ? parts.length : 0
+  if (given < 1) return { weights: w, cells: c }
+  // Materialising a stack must still respect the ceiling on places.
+  if (totalCells(c) - c[at].length + given > MAX_SLOTS) return { weights: w, cells: c }
+  var previous = c[at]
+  var next = normalizeWeights(parts, given)
+  var built = []
+  for (var i = 0; i < given; i++) {
+    // A drag moves the bands; it must not flatten a part that is divided
+    // again inside. Only a changing part count — a stack being written down —
+    // starts from plain parts.
+    var keep = given === previous.length ? partSplit(previous[i]) : []
+    built.push(keep.length > 1 ? { weight: next[i], parts: keep } : next[i])
+  }
   var out = c.slice()
-  out[at] = next
+  out[at] = built
   return { weights: w, cells: out }
 }
 
@@ -482,6 +623,17 @@ function rectSlotPositions(layout, windowCount) {
     return out
   }
   return ratioCells(spec, n).slots
+}
+
+// What each drawn place *is*: which slot, which of its parts, and which piece
+// of that part. Taken from the same pass that draws the rectangles, so the two
+// can never drift apart — everything that edits a place goes through this
+// rather than re-deriving the order.
+function placeAddresses(layout, windowCount) {
+  var spec = normalizeLayout(layout)
+  var n = Math.max(0, Math.round(Number(windowCount) || 0))
+  if (n === 0 || spec.kind === "grid") return []
+  return ratioCells(spec, n).addresses
 }
 
 function ratioCells(spec, n) {
@@ -548,9 +700,13 @@ function ratioCells(spec, n) {
     }
     // Everything past the last place stacks into one slot, which simply means
     // that slot is cut into more parts. A ratio drawn for two parts says
-    // nothing about how four should sit, so the stack shares the slot evenly.
+    // nothing about how four should sit, so the stack shares the slot evenly —
+    // counting the *places* it already holds, which is not the number of parts
+    // once one of them is divided again.
     var stackAt = spec.overflow === "first" ? 0 : k - 1
-    subs[stackAt] = evenCell(subs[stackAt].length + n - base)
+    var held = 0
+    for (i = 0; i < subs[stackAt].length; i++) held += partPieces(subs[stackAt][i])
+    subs[stackAt] = evenCell(held + n - base)
   }
 
   primary = exactNormalize(primary)
@@ -560,17 +716,38 @@ function ratioCells(spec, n) {
   // same thing with a count that grows as windows arrive.
   var cells = []
   var cellSlot = []
+  var cellAddr = []
   var offset = 0
   for (var slot = 0; slot < primary.length; slot++) {
     var size = primary[slot] / 100
     if (slot === primary.length - 1) size = 1 - offset  // absorb rounding drift
-    var parts = exactNormalize(subs[slot])
+    var list = subs[slot]
+    var weights = []
+    for (s = 0; s < list.length; s++) weights.push(partWeight(list[s]))
+    var parts = exactNormalize(weights)
     var crossed = 0
     for (s = 0; s < parts.length; s++) {
       var subSize = parts[s] / 100
       if (s === parts.length - 1) subSize = 1 - crossed  // absorb rounding drift
-      cells.push(orient(spec.orientation, offset, size, crossed, subSize))
-      cellSlot.push(slot)
+      var split = partSplit(list[s])
+      if (split.length > 1) {
+        // The part is cut again, back along the grain: same band across, and
+        // the slot's own width divided between the pieces.
+        var inner = exactNormalize(split)
+        var run = 0
+        for (var q = 0; q < inner.length; q++) {
+          var innerSize = size * inner[q] / 100
+          if (q === inner.length - 1) innerSize = size - run
+          cells.push(orient(spec.orientation, offset + run, innerSize, crossed, subSize))
+          cellSlot.push(slot)
+          cellAddr.push({ slot: primaryPos[slot], part: s, piece: q })
+          run += innerSize
+        }
+      } else {
+        cells.push(orient(spec.orientation, offset, size, crossed, subSize))
+        cellSlot.push(slot)
+        cellAddr.push({ slot: primaryPos[slot], part: s, piece: 0 })
+      }
       crossed += subSize
     }
     offset += size
@@ -587,17 +764,23 @@ function ratioCells(spec, n) {
 
   var rects = []
   var slots = []
+  var addresses = []
   for (i = 0; i < order.length; i++) {
     for (var c = 0; c < cells.length; c++) {
       if (cellSlot[c] === order[i]) {
         rects.push(cells[c])
         slots.push(primaryPos[cellSlot[c]])
+        addresses.push(cellAddr[c])
       }
     }
   }
   // Under "hold" there are more cells than windows; the surplus are the empty
   // places, and they are last because the list is in fill order.
-  return { rects: rects.slice(0, n), slots: slots.slice(0, n) }
+  return {
+    rects: rects.slice(0, n),
+    slots: slots.slice(0, n),
+    addresses: addresses.slice(0, n)
+  }
 }
 
 // A ratio layout is one-dimensional; `orientation` decides whether that
@@ -1465,6 +1648,199 @@ function swappedPins(pins, workspaceId, a, b) {
   return out
 }
 
+// ------------------------------------------------------------- moving places
+
+// The layout as slots of parts of pieces, each piece carrying the apps pinned
+// to it. Everything about a drop is easier to say in this shape than in
+// weights, cells and place numbers — and turning it back afterwards renumbers
+// the pins for free, which is the part that is easy to get wrong.
+function placeTree(layout, pins, workspaceId) {
+  var spec = normalizeLayout(layout)
+  var apps = slotApps({ profiles: [{ name: "x", pins: pins || {}, fallback: "dwindle" }],
+    activeProfile: "x", layouts: [] }, workspaceId)
+  var addresses = placeAddresses(spec, totalCells(spec.cells))
+
+  var number = {}
+  for (var i = 0; i < addresses.length; i++) {
+    var at = addresses[i]
+    number[at.slot + ":" + at.part + ":" + at.piece] = i + 1
+  }
+
+  var slots = []
+  for (var s = 0; s < spec.weights.length; s++) {
+    var parts = []
+    for (var p = 0; p < spec.cells[s].length; p++) {
+      var split = partSplit(spec.cells[s][p])
+      var count = split.length > 1 ? split.length : 1
+      var pieces = []
+      for (var q = 0; q < count; q++) {
+        var place = number[s + ":" + p + ":" + q]
+        pieces.push({
+          weight: split.length > 1 ? split[q] : 100,
+          apps: (place !== undefined && apps.length >= place) ? apps[place - 1].slice() : []
+        })
+      }
+      parts.push({ weight: partWeight(spec.cells[s][p]), pieces: pieces })
+    }
+    slots.push({ weight: spec.weights[s], parts: parts })
+  }
+  return slots
+}
+
+// Back to a layout, and to the pins that go with it: an app's places are
+// wherever its name ended up in the tree, numbered in the new fill order.
+function placeTreeToShape(layout, slots, pins, workspaceId) {
+  var spec = normalizeLayout(layout)
+  var weights = []
+  var cells = []
+  var kept = []
+  var i, j, q
+
+  for (i = 0; i < slots.length; i++) {
+    var parts = []
+    for (j = 0; j < slots[i].parts.length; j++) {
+      var part = slots[i].parts[j]
+      if (part.pieces.length === 0) continue
+      if (part.pieces.length === 1) parts.push(part.weight)
+      else {
+        var inner = []
+        for (q = 0; q < part.pieces.length; q++) inner.push(part.pieces[q].weight)
+        parts.push({ weight: part.weight, parts: inner })
+      }
+    }
+    if (parts.length === 0) continue
+    weights.push(slots[i].weight)
+    cells.push(parts)
+    kept.push(i)
+  }
+  if (weights.length === 0) return null
+
+  var shape = normalizeLayout({
+    id: spec.id, name: spec.name, kind: spec.kind, orientation: spec.orientation,
+    overflow: spec.overflow, fill: spec.fill, underfill: spec.underfill,
+    gridColumns: spec.gridColumns, weights: weights, cells: cells
+  })
+
+  var addresses = placeAddresses(shape, totalCells(shape.cells))
+  var number = {}
+  for (i = 0; i < addresses.length; i++) {
+    var at = addresses[i]
+    number[at.slot + ":" + at.part + ":" + at.piece] = i + 1
+  }
+
+  var wanted = {}
+  for (i = 0; i < kept.length; i++) {
+    var live = 0
+    for (j = 0; j < slots[kept[i]].parts.length; j++) {
+      var source = slots[kept[i]].parts[j]
+      if (source.pieces.length === 0) continue
+      for (q = 0; q < source.pieces.length; q++) {
+        var place = number[i + ":" + live + ":" + q]
+        var here = source.pieces[q].apps
+        for (var a = 0; a < here.length; a++) {
+          if (!wanted[here[a]]) wanted[here[a]] = []
+          if (place !== undefined && wanted[here[a]].indexOf(place) === -1) wanted[here[a]].push(place)
+        }
+      }
+      live++
+    }
+  }
+
+  var key = normalizeWorkspaceId(workspaceId)
+  var out = {}
+  var input = (pins && typeof pins === "object") ? pins : {}
+  for (var match in input) {
+    var pin = normalizePin(input[match])
+    if (pin === null) continue
+    if (key === null || pin.workspace !== key) {
+      out[match] = input[match]
+      continue
+    }
+    var next = {
+      workspace: pin.workspace,
+      slots: (wanted[match] || []).sort(function(x, y) { return x - y })
+    }
+    if (pin.name) next.name = pin.name
+    if (pin.command) next.command = pin.command
+    out[match] = next
+  }
+  return { weights: shape.weights, cells: shape.cells, pins: out }
+}
+
+// Which edges of a place can be dropped on: all four, for any place of a ratio
+// layout. Three levels are enough for that — a slot with one thing in it
+// becomes two slots, a part gets another part beside it, and a part divides
+// into pieces along the grain — so there is no cut left to refuse.
+function dropDirections(layout, place) {
+  var spec = normalizeLayout(layout)
+  var addresses = placeAddresses(spec, totalCells(spec.cells))
+  if (spec.kind === "grid" || addresses[Math.round(Number(place)) - 1] === undefined) return {}
+  return { left: true, right: true, top: true, bottom: true }
+}
+
+// Drop one place onto an edge of another: the place being carried is taken out
+// of the shape, the place under the cursor is cut in two, and the apps land in
+// the half nearest the edge. What a tiling window manager does when you move a
+// window onto the side of another, except that it is written down.
+function movePlaceInto(layout, pins, workspaceId, fromPlace, toPlace, edge) {
+  var spec = normalizeLayout(layout)
+  if (spec.kind === "grid") return null
+  var from = Math.round(Number(fromPlace))
+  var to = Math.round(Number(toPlace))
+  if (!isFiniteNumber(from) || !isFiniteNumber(to) || from === to) return null
+  if (!dropDirections(spec, to)[edge]) return null
+
+  var addresses = placeAddresses(spec, totalCells(spec.cells))
+  if (from > addresses.length || to > addresses.length || from < 1 || to < 1) return null
+  var source = { slot: addresses[from - 1].slot, part: addresses[from - 1].part,
+    piece: addresses[from - 1].piece }
+  var target = addresses[to - 1]
+
+  var slots = placeTree(spec, pins, workspaceId)
+  var carried = slots[source.slot].parts[source.part].pieces[source.piece].apps.slice()
+  var first = edge === "left" || edge === "top"
+  var alongEdges = spec.orientation === "rows"
+    ? { top: true, bottom: true } : { left: true, right: true }
+
+  if (alongEdges[edge]) {
+    var slot = slots[target.slot]
+    var part = slot.parts[target.part]
+    if (slot.parts.length === 1 && part.pieces.length === 1) {
+      // A slot holding one thing: it becomes two slots side by side.
+      var half = slot.weight / 2
+      slot.weight = half
+      slots.splice(target.slot + (first ? 0 : 1), 0,
+        { weight: half, parts: [{ weight: 100, pieces: [{ weight: 100, apps: carried }] }] })
+      if (source.slot >= target.slot + (first ? 0 : 1)) source.slot += 1
+    } else {
+      // A part of a slot: the part divides along the grain instead, which is
+      // the level that lets a stacked half become two columns.
+      var piece = part.pieces[target.piece]
+      var share = piece.weight / 2
+      piece.weight = share
+      part.pieces.splice(target.piece + (first ? 0 : 1), 0, { weight: share, apps: carried })
+      if (source.slot === target.slot && source.part === target.part
+        && source.piece >= target.piece + (first ? 0 : 1)) source.piece += 1
+    }
+  } else {
+    var into = slots[target.slot]
+    var whole = into.parts[target.part]
+    var band = whole.weight / 2
+    whole.weight = band
+    into.parts.splice(target.part + (first ? 0 : 1), 0,
+      { weight: band, pieces: [{ weight: 100, apps: carried }] })
+    if (source.slot === target.slot && source.part >= target.part + (first ? 0 : 1)) source.part += 1
+  }
+
+  // Take the carried place out. A part or a slot left holding nothing goes
+  // too, and its room is shared out by the normalizing on the way back.
+  var origin = slots[source.slot].parts[source.part]
+  origin.pieces.splice(source.piece, 1)
+  if (origin.pieces.length === 0) slots[source.slot].parts.splice(source.part, 1)
+
+  return placeTreeToShape(spec, slots, pins, workspaceId)
+}
+
 // ------------------------------------------------------------------ capture
 
 // Group windows that share a band of the main axis: the columns of a columns
@@ -1653,6 +2029,24 @@ var LUA_RUNTIME = [
   '  return out',
   'end',
   '',
+  '-- A part is either a plain cross weight or a table saying how wide it is and',
+  '-- how it is cut along the grain again.',
+  'local function part_weight(part)',
+  '  if type(part) == "table" then return part.weight end',
+  '  return part',
+  'end',
+  '',
+  'local function part_split(part)',
+  '  if type(part) == "table" and part.parts then return part.parts end',
+  '  return {}',
+  'end',
+  '',
+  'local function part_pieces(part)',
+  '  local split = part_split(part)',
+  '  if #split > 1 then return #split end',
+  '  return 1',
+  'end',
+  '',
   '-- Even parts for a slot: what overflow stacking falls back to when it adds',
   '-- parts to a slot whose ratio was drawn for fewer of them.',
   'local function even_cell(count)',
@@ -1708,7 +2102,9 @@ var LUA_RUNTIME = [
   '  local k = #weights',
   '  local primary, subs = {}, {}',
   '  local base = 0',
-  '  for i = 1, k do base = base + #counts[i] end',
+  '  for i = 1, k do',
+  '    for j = 1, #counts[i] do base = base + part_pieces(counts[i][j]) end',
+  '  end',
   '  -- A layout with a split slot was drawn in two dimensions and holds: there',
   '  -- is no sensible way to grow one of its halves into the missing window.',
   '  local split = base > k',
@@ -1732,7 +2128,9 @@ var LUA_RUNTIME = [
   '  else',
   '    for i = 1, k do primary[i] = weights[i]; subs[i] = counts[i] end',
   '    local at = (spec.overflow == "first") and 1 or k',
-  '    subs[at] = even_cell(#subs[at] + n - base)',
+  '    local held = 0',
+  '    for i = 1, #subs[at] do held = held + part_pieces(subs[at][i]) end',
+  '    subs[at] = even_cell(held + n - base)',
   '  end',
   '',
   '  primary = normalize(primary)',
@@ -1742,13 +2140,30 @@ var LUA_RUNTIME = [
   '  for slot = 1, #primary do',
   '    local size = primary[slot] / 100',
   '    if slot == #primary then size = 1 - offset end',
-  '    local parts = normalize(subs[slot])',
+  '    local list = subs[slot]',
+  '    local weights_of = {}',
+  '    for s = 1, #list do weights_of[s] = part_weight(list[s]) end',
+  '    local parts = normalize(weights_of)',
   '    local crossed = 0',
   '    for s = 1, #parts do',
   '      local sub_size = parts[s] / 100',
   '      if s == #parts then sub_size = 1 - crossed end',
-  '      cells[#cells + 1] = orient(spec.orientation, offset, size, crossed, sub_size)',
-  '      cell_slot[#cell_slot + 1] = slot',
+  '      local split = part_split(list[s])',
+  '      if #split > 1 then',
+  '        -- The part is cut again, back along the grain.',
+  '        local inner = normalize(split)',
+  '        local run = 0',
+  '        for q = 1, #inner do',
+  '          local inner_size = size * inner[q] / 100',
+  '          if q == #inner then inner_size = size - run end',
+  '          cells[#cells + 1] = orient(spec.orientation, offset + run, inner_size, crossed, sub_size)',
+  '          cell_slot[#cell_slot + 1] = slot',
+  '          run = run + inner_size',
+  '        end',
+  '      else',
+  '        cells[#cells + 1] = orient(spec.orientation, offset, size, crossed, sub_size)',
+  '        cell_slot[#cell_slot + 1] = slot',
+  '      end',
   '      crossed = crossed + sub_size',
   '    end',
   '    offset = offset + size',
@@ -1917,7 +2332,18 @@ function layoutSpecLua(layout) {
   var cells = []
   for (i = 0; i < spec.cells.length; i++) {
     var parts = []
-    for (var p = 0; p < spec.cells[i].length; p++) parts.push(luaNumber(spec.cells[i][p]))
+    for (var p = 0; p < spec.cells[i].length; p++) {
+      var part = spec.cells[i][p]
+      var split = partSplit(part)
+      if (split.length > 1) {
+        var inner = []
+        for (var q = 0; q < split.length; q++) inner.push(luaNumber(split[q]))
+        parts.push("{ weight = " + luaNumber(partWeight(part)) +
+          ", parts = { " + inner.join(", ") + " } }")
+      } else {
+        parts.push(luaNumber(partWeight(part)))
+      }
+    }
     cells.push("{ " + parts.join(", ") + " }")
   }
   return "W.specs[" + luaString(spec.id) + "] = { " +
@@ -2235,13 +2661,19 @@ if (typeof module !== "undefined") {
     normalizeCells: normalizeCells,
     totalCells: totalCells,
     cellParts: cellParts,
+    partWeight: partWeight,
+    partSplit: partSplit,
+    partPieces: partPieces,
     shapeAddSlot: shapeAddSlot,
     shapeRemoveSlot: shapeRemoveSlot,
     shapeSplitAlong: shapeSplitAlong,
     shapeSplitAcross: shapeSplitAcross,
     shapeMerge: shapeMerge,
     shapeSetCell: shapeSetCell,
+    shapeSetPiece: shapeSetPiece,
+    growForCount: growForCount,
     rectSlotPositions: rectSlotPositions,
+    placeAddresses: placeAddresses,
     slotRects: slotRects,
     sanitizeName: sanitizeName,
     slugify: slugify,
@@ -2268,6 +2700,8 @@ if (typeof module !== "undefined") {
     slotKeys: slotKeys,
     slotApps: slotApps,
     swappedPins: swappedPins,
+    dropDirections: dropDirections,
+    movePlaceInto: movePlaceInto,
     captureLayout: captureLayout,
     appPattern: appPattern,
     pinEntries: pinEntries,

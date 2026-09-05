@@ -50,6 +50,8 @@ On first run the plugin appends one guarded line to `~/.config/hypr/hyprland.lua
 that loads its generated layouts. Nothing is assigned to any workspace until you
 pick something, so installing it changes nothing about how your desktop tiles.
 
+A list of everything it does is in [docs/features.md](docs/features.md).
+
 ## Using it
 
 Click the bar icon — it is a live miniature of the current workspace's layout.
@@ -69,6 +71,18 @@ halves, thirds, quarters, fifths and the golden ratio; hold `Shift` to drag free
 Double-click a divider to even everything out. A slot that has been split has a
 divider inside it too, running the other way; drag that to make the halves
 uneven.
+
+**Extra windows become real places.** Overflow is a drawing rule: five windows
+in a three-place layout are *shown* stacked, and the moment one closes the stack
+is gone — nothing to pin an app to, no divider to drag. So while you have the
+workspace open in the panel, the drawing is written down: the layout grows to
+hold what is actually open, exactly as it was already being drawn, and those
+places stay put afterwards. A shipped layout forks first, so `Even` stays
+`Even`.
+
+The `extra →` setting still decides *how* it grows — stacked into the last slot,
+the first, or as new slots beside them — and `fewer →` still decides what the
+shape does when a window closes.
 
 **Shape row.** Add or remove a slot, flip between columns and rows, split evenly,
 and choose where windows past the last slot go. The count reads `3 cols · 4
@@ -112,11 +126,26 @@ A place can hold several apps and an app several places: aim a slot and click
 each app you want there, and whichever is open takes it. If you want both on
 screen at once, split the place in two instead.
 
-**Rearrange by dragging.** Hold a tile and drop it on another and the two
-exchange their apps. The tile you picked up fades, the one under the cursor
-lights up, and what you are carrying rides with the pointer — `Neovim ⇄ 3`, the
-app in your hand and the place it is about to take. The windows follow on the
-next re-tile. A short wobble is still a click, so aiming a slot and carrying one
+**Rearrange by dragging.** Hold a tile and carry it onto another. The tile you
+picked up fades, the one under the cursor lights up, and what you are carrying
+rides with the pointer — `Neovim ⇄ 3`, the app in your hand and the place it is
+about to take.
+
+Drop it in the **middle** and the two places exchange their apps.
+
+**Hold it near an edge** for a moment and that half of the target lights up:
+drop there and the target is cut in two, your apps take the half by the edge,
+and the place they came from is gone — its room shared out among the rest. Three
+columns, carry the third onto the bottom of the second, and you have one
+standalone column beside a stacked pair. It is the move a tiling window manager
+makes when you drop a window on the side of another, except that it is written
+down: real places, with dividers to drag and somewhere to pin an app.
+
+All four edges work on any place, in either direction. A slot holding one thing
+becomes two slots; a part of a split slot gets another part beside it, or
+divides along the grain into pieces of its own — so a stacked half really can
+become two columns side by side. Each of those has a divider you can drag
+afterwards. A short wobble is still a click, so aiming a slot and carrying one
 stay different gestures.
 
 **Give an app a place in the split.** Click a slot in the canvas and it lights
@@ -252,7 +281,15 @@ o.bind("SUPER + ALT + L", "Workspace layout", "omarchy-shell workspace-layout to
 
 A layout's `cells` says how each slot is cut across the grain: `"cells": [1, 2]`
 splits the second slot in two, and `[[100], [30, 70]]` is the same split dragged
-off centre. A profile's `monitors` maps a monitor name to a layout.
+off centre. A part that is cut again — back along the grain — says so:
+
+```json
+"cells": [[100], [50, { "weight": 50, "parts": [40, 60] }]]
+```
+
+a column beside another that is split into a top half and a bottom half, the
+bottom half divided into two. Three levels is the whole model; there is no
+fourth. A profile's `monitors` maps a monitor name to a layout.
 
 An app pin is one line in that JSON: `"firefox": "3"` sends it to workspace 3,
 `"firefox": { "workspace": "3", "slot": 2 }` sends it to the second slot of

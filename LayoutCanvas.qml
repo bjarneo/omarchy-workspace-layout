@@ -39,11 +39,17 @@ Item {
   // A drag of a cross-grain divider: the slot, by position, and the parts it
   // should be cut into now.
   signal cellWeightsChanged(int slot, var parts)
+  // A drag of the divider inside a divided part: which slot, which part, and
+  // the pieces it should be cut into now.
+  signal pieceWeightsChanged(int slot, int part, var pieces)
   // Hold a tile and drop it on another: the two places exchange their apps.
   signal placesSwapped(int from, int to)
   // The two ways to cut the place under the cursor, without going through a
   // menu: "along" is another slot beside it, "across" is another part of it.
   signal splitRequested(int slot, string direction)
+  // Carried onto the edge of another place and held there: the place under the
+  // cursor is cut in two and the carried apps land in the half by the edge.
+  signal placeDropped(int from, int to, string edge)
 
   readonly property var spec: Model.normalizeLayout(root.layout)
   readonly property bool isRatio: spec.kind !== "grid"
@@ -70,13 +76,49 @@ Item {
   // Which slot of the layout each drawn tile belongs to, by position.
   readonly property var rectSlots: Model.rectSlotPositions(root.spec, root.drawnCount)
 
+  // What each drawn place is — slot, part, piece — so a handle knows what it
+  // would be moving.
+  readonly property var rectAddresses: Model.placeAddresses(root.spec, root.drawnCount)
+
+  // The dividers *inside* a divided part, running back along the grain. The
+  // third level: a stacked half cut into two columns has one of these.
+  readonly property var pieceHandles: {
+    var out = []
+    if (!root.isRatio) return out
+    var runs = {}
+    var i
+    for (i = 0; i < root.rectAddresses.length; i++) {
+      var at = root.rectAddresses[i]
+      if (!at) continue
+      var key = at.slot + ":" + at.part
+      if (!runs[key]) runs[key] = []
+      runs[key].push(i)
+    }
+    for (var group in runs) {
+      var indices = runs[group]
+      if (indices.length < 2) continue
+      var owner = root.rectAddresses[indices[0]]
+      for (var j = 0; j < indices.length - 1; j++) {
+        var rect = root.rects[indices[j]]
+        if (!rect) continue
+        out.push(root.horizontal
+          ? { slot: owner.slot, part: owner.part, index: j, count: indices.length,
+              main: rect.x + rect.w, start: rect.y, span: rect.h }
+          : { slot: owner.slot, part: owner.part, index: j, count: indices.length,
+              main: rect.y + rect.h, start: rect.x, span: rect.w })
+      }
+    }
+    return out
+  }
+
   // The dividers *inside* a split slot, running across the grain. Derived from
   // the tiles actually drawn rather than from the weights, so they land on the
   // seam the user can see.
   //
-  // Only offered while a slot is showing exactly the parts it was drawn with:
-  // once overflow stacking has piled extra windows into it, the parts are an
-  // even share of however many arrived and there is no stored ratio to drag.
+  // Offered wherever a slot is showing more than one part — including a slot
+  // that only has parts because overflow stacked windows into it. There is no
+  // stored ratio behind those, so dragging one writes the parts down: the
+  // stack becomes a split the layout remembers.
   readonly property var crossHandles: {
     var out = []
     if (!root.isRatio) return out
@@ -89,15 +131,37 @@ Item {
     }
     for (var key in runs) {
       var slot = Number(key)
-      var indices = runs[key]
-      var parts = root.spec.cells[slot]
-      if (!parts || indices.length < 2 || indices.length !== parts.length) continue
+      var indices = []
+      // One entry per part of the slot: the seam between parts, not between
+      // the pieces inside one of them, which has its own handle.
+      var seenParts = {}
+      for (var r = 0; r < runs[key].length; r++) {
+        var addr = root.rectAddresses[runs[key][r]]
+        if (!addr || seenParts[addr.part]) continue
+        seenParts[addr.part] = true
+        indices.push(runs[key][r])
+      }
+      if (indices.length < 2) continue
+      // The handle spans the slot, not the first piece of it: a part that is
+      // divided again is only one column wide at its first rect.
+      var lowest = 1
+      var highest = 0
+      for (var e = 0; e < runs[key].length; e++) {
+        var edge = root.rects[runs[key][e]]
+        if (!edge) continue
+        var from = root.horizontal ? edge.x : edge.y
+        var to = root.horizontal ? edge.x + edge.w : edge.y + edge.h
+        if (from < lowest) lowest = from
+        if (to > highest) highest = to
+      }
       for (var j = 0; j < indices.length - 1; j++) {
         var rect = root.rects[indices[j]]
         if (!rect) continue
         out.push(root.horizontal
-          ? { slot: slot, index: j, cross: rect.y + rect.h, start: rect.x, span: rect.w }
-          : { slot: slot, index: j, cross: rect.x + rect.w, start: rect.y, span: rect.h })
+          ? { slot: slot, index: j, count: indices.length,
+              cross: rect.y + rect.h, start: lowest, span: highest - lowest }
+          : { slot: slot, index: j, count: indices.length,
+              cross: rect.x + rect.w, start: lowest, span: highest - lowest })
       }
     }
     return out
@@ -111,6 +175,47 @@ Item {
   // being carried can be drawn under it.
   property real carryX: 0
   property real carryY: 0
+
+  // Hold a carried tile over another for a moment and the edges wake up: drop
+  // on one and the target splits, drop in the middle and the two swap. Held
+  // rather than immediate, so a tile carried *across* another on its way
+  // somewhere else does not offer to cut it up.
+  property bool carryZones: false
+  property string carryEdge: ""
+
+  readonly property var carryAllowed: root.carryOver > 0
+    ? Model.dropDirections(root.spec, root.carryOver) : ({})
+
+  Timer {
+    id: dwell
+    interval: 400
+    repeat: false
+    onTriggered: root.carryZones = root.carrying > 0 && root.carryOver > 0
+  }
+
+  onCarryOverChanged: {
+    root.carryZones = false
+    root.carryEdge = ""
+    if (root.carrying > 0 && root.carryOver > 0 && root.carryOver !== root.carrying) dwell.restart()
+    else dwell.stop()
+  }
+
+  // Which edge of the place under the cursor is being aimed at, or "" for the
+  // middle. A third of the way in on either side counts as the edge.
+  function edgeAt(place, x, y) {
+    var rect = root.rects[place - 1]
+    if (!rect) return ""
+    var width = Math.max(1, stage.width)
+    var height = Math.max(1, stage.height)
+    var fx = (x - rect.x * width) / Math.max(1, rect.w * width)
+    var fy = (y - rect.y * height) / Math.max(1, rect.h * height)
+    var allowed = root.carryAllowed
+    if (fx < 0.33 && allowed.left) return "left"
+    if (fx > 0.67 && allowed.right) return "right"
+    if (fy < 0.33 && allowed.top) return "top"
+    if (fy > 0.67 && allowed.bottom) return "bottom"
+    return ""
+  }
 
   // What the carried place holds, for the label that follows the cursor.
   readonly property var carryApps: {
@@ -134,7 +239,8 @@ Item {
 
   property int activeDivider: -1
   property int activeCross: -1
-  readonly property bool dragging: activeDivider >= 0 || activeCross >= 0
+  property int activePiece: -1
+  readonly property bool dragging: activeDivider >= 0 || activeCross >= 0 || activePiece >= 0
 
   implicitHeight: Style.space(140)
 
@@ -236,19 +342,28 @@ Item {
               var point = mapToItem(stage, mouse.x, mouse.y)
               root.carryX = point.x
               root.carryY = point.y
-              root.carryOver = root.placeAt(point.x, point.y)
+              var over = root.placeAt(point.x, point.y)
+              if (over !== root.carryOver) root.carryOver = over
+              root.carryEdge = root.carryZones ? root.edgeAt(over, point.x, point.y) : ""
             }
 
             onReleased: function(mouse) {
               var from = root.carrying
               var to = root.carryOver
+              var edge = root.carryEdge
               root.carrying = 0
               root.carryOver = 0
+              root.carryZones = false
+              root.carryEdge = ""
               if (from > 0) {
-                // A drag that ended on another tile is a swap; one that ended
-                // where it started is not a click either — the user changed
-                // their mind.
-                if (to > 0 && to !== from) root.placesSwapped(from, to)
+                // Dropped on an edge, the target splits and the carried apps
+                // take the new half; dropped in the middle, the two places
+                // exchange. Ending where it started is neither — the user
+                // changed their mind, and it is not a click either.
+                if (to > 0 && to !== from) {
+                  if (edge !== "") root.placeDropped(from, to, edge)
+                  else root.placesSwapped(from, to)
+                }
                 return
               }
               if (mouse.button === Qt.RightButton) {
@@ -262,7 +377,28 @@ Item {
             onCanceled: {
               root.carrying = 0
               root.carryOver = 0
+              root.carryZones = false
+              root.carryEdge = ""
             }
+          }
+
+          // Where the carried apps would land: the half by the edge under the
+          // cursor, or the whole tile when the middle means "swap these two".
+          Rectangle {
+            visible: tile.dropTarget
+            color: Util.alpha(root.accent, 0.55)
+            radius: Style.cornerRadius
+            x: root.carryEdge === "right" ? parent.width / 2 : 0
+            y: root.carryEdge === "bottom" ? parent.height / 2 : 0
+            width: (root.carryEdge === "left" || root.carryEdge === "right")
+              ? parent.width / 2 : parent.width
+            height: (root.carryEdge === "top" || root.carryEdge === "bottom")
+              ? parent.height / 2 : parent.height
+
+            Behavior on x { NumberAnimation { duration: 80 } }
+            Behavior on y { NumberAnimation { duration: 80 } }
+            Behavior on width { NumberAnimation { duration: 80 } }
+            Behavior on height { NumberAnimation { duration: 80 } }
           }
 
           // The two cuts, on the tile itself. The menu has them too, but a
@@ -516,6 +652,21 @@ Item {
           acceptedButtons: Qt.LeftButton
           preventStealing: true
 
+          // What the slot's parts are right now: the ratio it was drawn with,
+          // or equal shares when the parts came from a stack and there is
+          // nothing stored yet.
+          function partsNow() {
+            var stored = root.spec.cells[crossHandle.spec.slot]
+            if (!stored || stored.length !== crossHandle.spec.count) {
+              return Model.evenWeights(crossHandle.spec.count)
+            }
+            // The bands themselves, not the parts: a part may be an object
+            // saying how it is divided again, and a divider moves its width.
+            var bands = []
+            for (var i = 0; i < stored.length; i++) bands.push(Model.partWeight(stored[i]))
+            return bands
+          }
+
           onPressed: root.activeCross = crossHandle.index
 
           onPositionChanged: function(mouse) {
@@ -528,9 +679,8 @@ Item {
               ? point.y / Math.max(1, stage.height) * 100
               : point.x / Math.max(1, stage.width) * 100
             var snap = !(mouse.modifiers & Qt.ShiftModifier)
-            var parts = root.spec.cells[crossHandle.spec.slot]
             root.cellWeightsChanged(crossHandle.spec.slot,
-              Model.setDivider(parts, crossHandle.spec.index, position, { snap: snap }))
+              Model.setDivider(partsNow(), crossHandle.spec.index, position, { snap: snap }))
           }
 
           onReleased: {
@@ -539,8 +689,106 @@ Item {
           }
 
           onDoubleClicked: {
-            var parts = root.spec.cells[crossHandle.spec.slot]
-            root.cellWeightsChanged(crossHandle.spec.slot, Model.evenWeights(parts.length))
+            root.cellWeightsChanged(crossHandle.spec.slot,
+              Model.evenWeights(crossHandle.spec.count))
+            root.committed()
+          }
+        }
+      }
+    }
+
+    // ------------------------------------------------------- piece dividers
+
+    Repeater {
+      model: root.pieceHandles.length
+
+      Item {
+        id: pieceHandle
+        required property int index
+
+        readonly property var spec: root.pieceHandles[pieceHandle.index]
+        readonly property bool hot: pieceHover.hovered || root.activePiece === pieceHandle.index
+        readonly property int grab: Style.space(11)
+
+        x: root.horizontal ? spec.main * stage.width - grab / 2 : spec.start * stage.width
+        y: root.horizontal ? spec.start * stage.height : spec.main * stage.height - grab / 2
+        width: root.horizontal ? grab : spec.span * stage.width
+        height: root.horizontal ? spec.span * stage.height : grab
+
+        Behavior on x { enabled: !root.dragging; NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+        Behavior on y { enabled: !root.dragging; NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
+
+        Rectangle {
+          anchors.centerIn: parent
+          width: root.horizontal ? Math.max(2, Style.space(3)) : parent.width * 0.5
+          height: root.horizontal ? parent.height * 0.5 : Math.max(2, Style.space(3))
+          radius: width < height ? width / 2 : height / 2
+          color: pieceHandle.hot ? root.accent : Util.alpha(root.foreground, 0.35)
+          opacity: root.editable ? 1 : 0.3
+
+          Behavior on color { ColorAnimation { duration: 90 } }
+        }
+
+        HoverHandler {
+          id: pieceHover
+          enabled: root.editable
+          cursorShape: root.horizontal ? Qt.SizeHorCursor : Qt.SizeVerCursor
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          enabled: root.editable
+          cursorShape: root.horizontal ? Qt.SizeHorCursor : Qt.SizeVerCursor
+          acceptedButtons: Qt.LeftButton
+          preventStealing: true
+
+          // The pieces divide the slot's own extent, so the drag is measured
+          // inside that band rather than across the whole stage.
+          function bounds() {
+            var lowest = 1
+            var highest = 0
+            for (var i = 0; i < root.rectAddresses.length; i++) {
+              var at = root.rectAddresses[i]
+              if (!at || at.slot !== pieceHandle.spec.slot) continue
+              var rect = root.rects[i]
+              var from = root.horizontal ? rect.x : rect.y
+              var to = root.horizontal ? rect.x + rect.w : rect.y + rect.h
+              if (from < lowest) lowest = from
+              if (to > highest) highest = to
+            }
+            return { from: lowest, span: Math.max(0.01, highest - lowest) }
+          }
+
+          function piecesNow() {
+            var part = root.spec.cells[pieceHandle.spec.slot][pieceHandle.spec.part]
+            var split = Model.partSplit(part)
+            return split.length === pieceHandle.spec.count
+              ? split : Model.evenWeights(pieceHandle.spec.count)
+          }
+
+          onPressed: root.activePiece = pieceHandle.index
+
+          onPositionChanged: function(mouse) {
+            if (root.activePiece !== pieceHandle.index) return
+            var point = mapToItem(stage, mouse.x, mouse.y)
+            var band = bounds()
+            var along = root.horizontal
+              ? point.x / Math.max(1, stage.width)
+              : point.y / Math.max(1, stage.height)
+            var position = (along - band.from) / band.span * 100
+            var snap = !(mouse.modifiers & Qt.ShiftModifier)
+            root.pieceWeightsChanged(pieceHandle.spec.slot, pieceHandle.spec.part,
+              Model.setDivider(piecesNow(), pieceHandle.spec.index, position, { snap: snap }))
+          }
+
+          onReleased: {
+            root.activePiece = -1
+            root.committed()
+          }
+
+          onDoubleClicked: {
+            root.pieceWeightsChanged(pieceHandle.spec.slot, pieceHandle.spec.part,
+              Model.evenWeights(pieceHandle.spec.count))
             root.committed()
           }
         }

@@ -39,15 +39,40 @@ Editing the *shape* is the exception: splitting or removing the slot behind a
 tile means editing `weights` by position, which is what `rectSlotPositions`
 maps back to.
 
-**A slot is two-dimensional.** `weights` is the main axis; `cells` is a parallel
-array holding *one list of part weights per slot* — `[[100], [30, 70]]` — and
-that is the whole of the second dimension, with no nesting beyond one level.
+**A drop rebuilds the shape from a tree, not by patching indices.**
+`placeTree` turns weights, cells and pins into slots-of-parts-carrying-apps;
+`movePlaceInto` edits that; `placeTreeToShape` turns it back and renumbers every
+pin from the new fill order. Patching place numbers in place is the version of
+this that looks simpler and silently scrambles the pins, because removing one
+place renumbers all the others.
+
+**Overflow is a drawing rule, and the panel writes it down.**
+`growSelectedForWindows` grows the *edited* workspace's layout to hold the
+windows actually open, following that layout's own overflow rule so the picture
+does not jump (it shifts by less than the two decimals the document stores).
+Only the selected workspace, never mid-drag, and through `editSelectedLayout`
+so a preset forks first. It cannot loop: after growing, places equals windows.
+
+**Dragging a stacked divider materialises the stack.** A slot showing three
+windows because overflow put them there has no stored ratio, so the drag writes
+one: `shapeSetCell` deliberately accepts a part count that differs from what is
+stored. That is also why it cannot be used to validate a stale drag — the cap on
+total places is the only guard left.
+
+**A layout is three levels, and no more.** `weights` runs along the main axis;
+`cells[i]` is that slot's parts, running across it; and a part may itself be
+`{ weight, parts: [...] }`, divided back along the main axis. Slots → parts →
+pieces, and nothing below that: a fourth level would make the panel a tree
+editor, and `dropDirections` only says yes because three is enough to express
+every edge of every place.
 The plain count (`[1, 2]`) is accepted as shorthand and normalizes to the same
 thing. Total places (`totalCells`, the sum of the lengths) is what MAX_SLOTS
 caps, not the number of weights, and `cells[i].length` is the part count —
 comparing `cells[i]` to a number is how `describeLayout` once printed "25×100".
 Overflow stacking is the same mechanism (it adds parts to one slot, evened
-out), which is why the two collapsed into one code path. Every edit that
+out), which is why the two collapsed into one code path — and it counts
+*places*, not parts, since a divided part is worth several. The fuzzer caught
+that one. Every edit that
 inserts or drops a slot has to move both arrays together, hence the `shape*`
 functions.
 

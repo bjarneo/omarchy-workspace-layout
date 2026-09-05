@@ -1322,6 +1322,125 @@ test("carrying one place onto another exchanges their apps", () => {
   assert.deepEqual(Model.swappedPins(pins, "special:x", 1, 3).foot.slots, [1, 2])
 })
 
+test("a part can be cut back along the grain, which is the third level", () => {
+  // Slots run one way, their parts the other, and a part's own pieces the
+  // first way again. Without that, a stacked half could never become two
+  // columns — the drop had to refuse it.
+  const nested = Model.normalizeLayout({
+    id: "n", name: "N", weights: [60, 40],
+    cells: [1, [50, { weight: 50, parts: [40, 60] }]]
+  })
+  assert.equal(Model.totalCells(nested.cells), 4)
+
+  const rects = Model.slotRects(nested, 4)
+  // The 60 column, then the top half of the 40, then the bottom half divided
+  // into two: 40% and 60% of that column's width.
+  assert.equal(Math.round(rects[1].h * 100), 50)
+  assert.equal(Math.round(rects[2].w * 100), 16)
+  assert.equal(Math.round(rects[3].w * 100), 24)
+  assert.equal(Math.round(rects[2].y * 100), 50)
+
+  // Its address says which slot, which part and which piece — taken from the
+  // same pass that draws it, so the two cannot drift.
+  assert.deepEqual(Model.placeAddresses(nested, 4)[3], { slot: 1, part: 1, piece: 1 })
+
+  // Dragging the band between parts must not flatten the pieces inside one.
+  const banded = Model.shapeSetCell(nested.weights, nested.cells, 1, [30, 70])
+  assert.deepEqual(Model.partSplit(banded.cells[1][1]), [40, 60])
+  // And the divider inside the part moves only that.
+  const inner = Model.shapeSetPiece(nested.weights, nested.cells, 1, 1, [25, 75])
+  assert.deepEqual(Model.partSplit(inner.cells[1][1]), [25, 75])
+  assert.equal(Model.partWeight(inner.cells[1][1]), 50)
+
+  // The hand-written form round-trips, and nonsense degrades to a plain part.
+  assert.deepEqual(Model.normalizeCells([[50, { weight: 50, parts: [40, 60] }]], 1),
+    [[50, { weight: 50, parts: [40, 60] }]])
+  assert.deepEqual(Model.normalizeCells([[{ weight: 50, parts: [100] }, 50]], 1), [[50, 50]])
+})
+
+test("a place carried onto the edge of another cuts it in two", () => {
+  const three = Model.normalizeLayout({ id: "t", name: "T", weights: [33.34, 33.33, 33.33] })
+  const pins = {
+    a: { workspace: "9", slots: [1] },
+    b: { workspace: "9", slots: [2] },
+    c: { workspace: "9", slots: [3] }
+  }
+
+  // Carry the first column onto the top of the second: the column it came from
+  // is gone, the one it landed on is cut into a top and a bottom, and the
+  // third takes its share of the room.
+  const dropped = Model.movePlaceInto(three, pins, 9, 1, 2, "top")
+  assert.deepEqual(dropped.weights.map(Math.round), [50, 50])
+  assert.deepEqual(dropped.cells.map((c) => c.length), [2, 1])
+  // Renumbered in the new fill order, which is the part that is easy to get
+  // wrong: a is the top half, b the bottom, c the remaining column.
+  assert.deepEqual(dropped.pins.a.slots, [1])
+  assert.deepEqual(dropped.pins.b.slots, [2])
+  assert.deepEqual(dropped.pins.c.slots, [3])
+
+  // Onto a side instead, and the target becomes two columns.
+  const sideways = Model.movePlaceInto(three, pins, 9, 1, 3, "right")
+  assert.deepEqual(sideways.weights.map(Math.round), [50, 25, 25])
+  assert.deepEqual(sideways.pins.a.slots, [3])
+  assert.deepEqual(sideways.pins.b.slots, [1])
+
+  // A part of a slot that is already cut up takes either cut: across, it gets
+  // another part beside it; along, the part itself divides into pieces. That
+  // third level is what makes a stacked half into two columns.
+  const split = Model.normalizeLayout({ id: "s", name: "S", weights: [60, 40], cells: [1, 2] })
+  assert.deepEqual(Model.dropDirections(split, 2),
+    { left: true, right: true, top: true, bottom: true })
+
+  const beside = Model.movePlaceInto(split, pins, 9, 1, 2, "left")
+  assert.deepEqual(beside.weights.map(Math.round), [100])
+  // One slot, first part divided into two pieces side by side, second part
+  // below it: a left of b, c underneath.
+  assert.equal(Model.partSplit(beside.cells[0][0]).length, 2)
+  assert.deepEqual(beside.pins.a.slots, [1])
+  assert.deepEqual(beside.pins.b.slots, [2])
+  assert.deepEqual(beside.pins.c.slots, [3])
+
+  const stacked = Model.movePlaceInto(split, pins, 9, 1, 2, "bottom")
+  assert.deepEqual(stacked.weights.map(Math.round), [100])
+  assert.equal(Model.totalCells(stacked.cells), 3)
+
+  // A rows layout swaps which edge means which cut, and offers all four too.
+  const rows = Model.normalizeLayout({ id: "r", name: "R", weights: [50, 50], orientation: "rows" })
+  assert.deepEqual(Model.dropDirections(rows, 1), { left: true, right: true, top: true, bottom: true })
+  const cut = Model.movePlaceInto(rows, { a: { workspace: "9", slots: [1] },
+    b: { workspace: "9", slots: [2] } }, 9, 1, 2, "left")
+  // Two rows, carry the first onto the left of the second: one row, split.
+  assert.equal(cut.weights.length, 1)
+  assert.equal(Model.totalCells(cut.cells), 2)
+
+  // Nonsense is refused rather than half-applied.
+  assert.equal(Model.movePlaceInto(three, pins, 9, 1, 1, "top"), null)
+  assert.equal(Model.movePlaceInto(three, pins, 9, 1, 9, "top"), null)
+  assert.equal(Model.movePlaceInto(
+    Model.normalizeLayout({ id: "g", kind: "grid" }), pins, 9, 1, 2, "top"), null)
+})
+
+test("the drop waits for you to hold still before offering to cut", () => {
+  const canvas = fs.readFileSync(path.join(__dirname, "..", "LayoutCanvas.qml"), "utf8")
+  assert.match(canvas, /signal placeDropped\(int from, int to, string edge\)/)
+  // The third level has a divider of its own, or it could be made and never
+  // adjusted.
+  assert.match(canvas, /readonly property var pieceHandles/)
+  assert.match(canvas, /signal pieceWeightsChanged\(int slot, int part, var pieces\)/)
+  // Held, not immediate: a tile carried across another on its way somewhere
+  // else must not offer to cut it up.
+  assert.match(canvas, /id: dwell/)
+  assert.match(canvas, /function edgeAt\(place, x, y\)/)
+  // Only the edges that can actually be cut are offered.
+  assert.match(canvas, /var allowed = root\.carryAllowed/)
+
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  assert.match(qml, /function dropPlace\(from, to, edge\)/)
+  // Shape and pins move in one write, because the numbers the pins are
+  // written in are about to change.
+  assert.match(qml, /layout\.cells = moved\.cells\s*\n\s*target\.pins = moved\.pins/)
+})
+
 test("the canvas carries a tile rather than mistaking a drag for a click", () => {
   const canvas = fs.readFileSync(path.join(__dirname, "..", "LayoutCanvas.qml"), "utf8")
   assert.match(canvas, /signal placesSwapped\(int from, int to\)/)
@@ -1424,12 +1543,50 @@ test("the canvas offers a handle for a cross-grain divider", () => {
   const canvas = fs.readFileSync(path.join(__dirname, "..", "LayoutCanvas.qml"), "utf8")
   assert.match(canvas, /signal cellWeightsChanged\(int slot, var parts\)/)
   assert.match(canvas, /readonly property var crossHandles/)
-  // Derived from the tiles actually drawn, so the handle lands on the seam.
-  assert.match(canvas, /indices\.length !== parts\.length\) continue/)
+  // Derived from the tiles actually drawn, so the handle lands on the seam —
+  // including a slot whose parts came from a stack, which is how a stack is
+  // turned into a split.
+  assert.match(canvas, /if \(indices\.length < 2\) continue/)
+  assert.match(canvas, /function partsNow\(\)/)
 
   const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
   assert.match(qml, /function stageCells\(slot, parts\)/)
   assert.match(qml, /onCellWeightsChanged: function\(slot, parts\) \{ root\.stageCells\(slot, parts\) \}/)
+})
+
+test("a window past the last place becomes a place, not a stack", () => {
+  // Overflow is a drawing rule: five windows in a three-place layout are shown
+  // stacked, and the moment one closes the stack is gone. Working from the
+  // panel that is wrong — the extra windows have nowhere to be pinned and no
+  // divider to drag — so the drawing is written down.
+  const stacked = Model.growForCount([50, 50], [1, 1], "last", 4)
+  assert.deepEqual(stacked.cells.map((c) => c.length), [1, 3])
+  assert.deepEqual(Model.growForCount([50, 50], [1, 1], "first", 4).cells.map((c) => c.length), [3, 1])
+
+  // "extra → new slots" grows sideways instead, as wide as the last.
+  const extended = Model.growForCount([70, 30], [1, 1], "extend", 4)
+  assert.equal(extended.weights.length, 4)
+  assert.deepEqual(extended.cells.map((c) => c.length), [1, 1, 1, 1])
+
+  // Enough places already, or at the ceiling: nothing happens.
+  assert.deepEqual(Model.growForCount([50, 50], [1, 2], "last", 3).cells.map((c) => c.length), [1, 2])
+  assert.deepEqual(Model.growForCount([50, 50], [4, 4], "last", 12).cells.map((c) => c.length), [4, 4])
+
+  // And the picture does not jump: what was drawn is what is stored, to
+  // within the two decimals the document keeps.
+  const before = Model.slotRects(Model.normalizeLayout({ id: "a", weights: [50, 50] }), 4)
+  const after = Model.slotRects(
+    Model.normalizeLayout({ id: "b", weights: stacked.weights, cells: stacked.cells }), 4)
+  for (let i = 0; i < before.length; i++) {
+    for (const key of ["x", "y", "w", "h"]) {
+      assert.ok(Math.abs(before[i][key] - after[i][key]) < 0.001, `${key} of rect ${i}`)
+    }
+  }
+
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  assert.match(qml, /function growSelectedForWindows\(\)/)
+  // Only the workspace being edited, and never mid-drag.
+  assert.match(qml, /if \(!layout \|\| layout\.kind === "grid" \|\| canvas\.dragging\) return/)
 })
 
 test("a cross-grain divider is dragged the same way as any other", () => {
@@ -1437,8 +1594,15 @@ test("a cross-grain divider is dragged the same way as any other", () => {
   // moves a divider on either axis.
   const dragged = Model.shapeSetCell([60, 40], [1, 2], 1, Model.setDivider([50, 50], 0, 30, {}))
   assert.deepEqual(dragged.cells, [[100], [30, 70]])
-  // A part count that does not match the slot is a stale drag, not an edit.
-  assert.deepEqual(Model.shapeSetCell([60, 40], [1, 2], 1, [100]).cells, [[100], [50, 50]])
+  // A different part count is not a mistake: a slot showing three windows
+  // because overflow stacked them there has no ratio to drag, and dragging
+  // its divider is how you say "these are places now".
+  assert.deepEqual(Model.shapeSetCell([60, 40], [1, 1], 1, [30, 30, 40]).cells,
+    [[100], [30, 30, 40]])
+  // The ceiling on places still holds, and a slot that is not there is not
+  // edited.
+  assert.deepEqual(Model.shapeSetCell([50, 50], [4, 4], 0, [20, 20, 20, 20, 20]).cells,
+    [[25, 25, 25, 25], [25, 25, 25, 25]])
   assert.deepEqual(Model.shapeSetCell([60, 40], [1, 2], 9, [30, 70]).cells, [[100], [50, 50]])
 
   // And the geometry follows it: the top part takes 30% of the column.
@@ -1653,7 +1817,14 @@ test("the Lua engine places windows exactly where the panel previews them",
       Model.normalizeLayout({ id: "l", weights: [25, 50, 25], cells: [2, 1, 2], orientation: "rows" }),
       Model.normalizeLayout({ id: "m", weights: [60, 40], cells: [1, 3], overflow: "first" }),
       Model.normalizeLayout({ id: "n", weights: [70, 30], cells: [1, 2], overflow: "extend" }),
-      Model.normalizeLayout({ id: "o", weights: [40, 60], cells: [2, 1], fill: "order" })
+      Model.normalizeLayout({ id: "o", weights: [40, 60], cells: [2, 1], fill: "order" }),
+      // A part cut again, back along the grain — the third dimension.
+      Model.normalizeLayout({ id: "p", weights: [60, 40],
+        cells: [1, [50, { weight: 50, parts: [40, 60] }]] }),
+      Model.normalizeLayout({ id: "q", weights: [50, 50], orientation: "rows",
+        cells: [[30, { weight: 70, parts: [25, 25, 50] }], 1], underfill: "hold" }),
+      Model.normalizeLayout({ id: "r", weights: [100],
+        cells: [[{ weight: 50, parts: [50, 50] }, 50]], overflow: "extend" })
     ])
 
     const specs = layouts.map((l) => Model.layoutSpecLua(l)).join("\n")
