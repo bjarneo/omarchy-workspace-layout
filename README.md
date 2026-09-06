@@ -66,6 +66,29 @@ something only if you are looking at them. Right-click one for what to do with
 the workspace itself — hand it back to Hyprland, capture the windows on it, or
 release the apps pinned to it.
 
+**Named workspaces.** A workspace does not have to have a number. Plugins that
+give each monitor its own set — [omarchy-per-monitor-workspaces][pmw], say —
+create *named* workspaces instead, and so does a `workspace` rule you write by
+hand. Those join the strip alongside the numbered ones and take a layout the
+same way.
+
+![Named workspaces in the strip](screenshots/named-workspaces.png)
+
+Hyprland gives a named workspace a negative id that is different every session,
+so nothing here is keyed by it. A layout given to one is stored as
+`"name:<the name>"` — the same string Hyprland writes a rule with — which
+survives the reboot that changes the id. Everywhere a workspace is taken, by the
+panel or the command line, a name works as well as a number:
+
+```bash
+omarchy-shell workspace-layout set name:code golden
+```
+
+`workspace-layout json` lists the named workspaces on screen if you are not sure
+what yours are called.
+
+[pmw]: https://github.com/mmsbrggr/omarchy-per-monitor-workspaces
+
 **Canvas.** The layout at your monitor's real proportions. Slots holding a window
 are filled and numbered; empty slots are outlined. Drag a divider and the windows
 move as you drag — nothing is written to disk until you let go. Dividers snap to
@@ -376,8 +399,9 @@ checks the file exists first, so leaving it does no harm. Workspaces return to
   interface has no resize hook, so `SUPER` + right-drag does nothing inside these
   layouts. Drag the panel's dividers, or use `[` and `]`. Ratios set that way are
   named and saved, which the mouse gesture never was.
-- **Named workspaces are supported.** They use stable `name:<workspace>` keys.
-  Special workspaces (`special:scratchpad`) remain untouched.
+- **Special workspaces are left alone.** `special:scratchpad` and friends are an
+  overlay with their own rules about what may live in them, and none of this has
+  been tried against one. Numbered and named workspaces both work.
 - **Opening at login needs the bar widget.** The launcher lives in the panel,
   which is loaded whether or not the panel is open — the same reason the
   command line lives there. A bar-less install running only `Service.qml` keeps
@@ -403,6 +427,10 @@ lives twice — once in JavaScript for the canvas, once in Lua for Hyprland — 
 `tests/model.test.js` runs the generated Lua through the `lua` interpreter and
 diffs it against the JavaScript rectangle for rectangle. If the preview and the
 compositor ever disagree, that test fails first.
+
+[docs/development.md](docs/development.md) is the longer version: how the pieces
+fit, the Hyprland API notes that were established by probing it, and the traps
+worth knowing before changing the geometry or the generated Lua.
 
 ## License
 

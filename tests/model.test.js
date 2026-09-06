@@ -991,7 +991,7 @@ test("a catch is refused everywhere it could not mean anything", () => {
 })
 
 test("a catch is a place number, so a drop renumbers it with the pins", () => {
-  // The bug AGENTS.md warns about, one level over: remove a place and every
+  // The bug docs/development.md warns about, one level over: remove a place and every
   // other number moves. A catch that was not renumbered would quietly point
   // at someone else's tile.
   const layout = { id: "split", name: "Split", weights: [50, 50], cells: [1, 1] }

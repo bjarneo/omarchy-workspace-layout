@@ -2157,7 +2157,7 @@ function movePlaceInto(layout, pins, workspaceId, fromPlace, toPlace, edge) {
 }
 
 // A catch is a place number too, so a drop or a swap renumbers it exactly the
-// way it renumbers a pin — and getting that wrong is the bug AGENTS.md warns
+// way it renumbers a pin — and getting that wrong is the bug docs/development.md warns
 // about: remove one place and every other number moves under you.
 //
 // Rather than teach the tree about two kinds of app claim, the catches are

@@ -1,5 +1,12 @@
 # Repository guidance
 
+Notes for working on the plugin. This file is deliberately **not** called
+`AGENTS.md` and must not be renamed to it: `omarchy plugin add` git-clones the
+whole repository into `~/.config/omarchy/plugins/`, so a root-level file that
+coding agents read and act on automatically would be installed onto every
+user's machine along with the plugin. Those filenames are gitignored. This is
+documentation — read it yourself, or point a tool at it explicitly.
+
 ## What lives where
 
 | File | Role |
@@ -11,6 +18,7 @@
 | `HyprlandSync.qml` | Config document → live Hyprland, via the generated Lua and `hyprctl eval`. Also the one-shot app gather, which needs its own process: the sync queue is latest-wins and a pin fires both. |
 | `Panel.qml` | The UI. Owns its own store and sync — see below. |
 | `Service.qml` | Optional background sync for a bar-less install. |
+| `docs/development.md` | This file: how the pieces fit and what will bite you. |
 
 ## Two things that will bite you
 

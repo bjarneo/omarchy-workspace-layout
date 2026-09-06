@@ -4,3 +4,11 @@ node_modules/
 
 # Scratch notes, not part of the plugin
 ideas.md
+
+# Agent instructions, if you keep any. `omarchy plugin add` clones this repo
+# straight into ~/.config/omarchy/plugins/, so a file that coding agents read
+# and act on automatically must never be tracked. The repo guidance lives in
+# docs/development.md, which is documentation and nothing else.
+AGENTS.md
+CLAUDE.md
+.cursorrules
