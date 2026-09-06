@@ -403,9 +403,22 @@ test("an assignment to a deleted layout falls back instead of pinning a ghost", 
   assert.equal(Model.layoutIdForWorkspace(config, 7), "dwindle")
 })
 
-test("named, special, and absurd workspaces are refused", () => {
+test("workspace keys preserve named workspaces and reject special ones", () => {
   assert.equal(Model.normalizeWorkspaceId("special:scratchpad"), null)
-  assert.equal(Model.normalizeWorkspaceId("browser"), null)
+  assert.equal(Model.normalizeWorkspaceKey("browser"), "name:browser")
+  assert.equal(Model.normalizeWorkspaceKey("name:browser"), "name:browser")
+  assert.equal(Model.normalizeWorkspaceKey("name:123"), "name:123")
+  assert.equal(Model.normalizeWorkspaceKey("0"), null)
+  assert.equal(Model.normalizeWorkspaceKey("-3"), null)
+  assert.equal(Model.normalizeWorkspaceKey(1.5), null)
+  assert.equal(Model.normalizeWorkspaceKey({ id: 2, name: "2" }), "2")
+  assert.equal(Model.normalizeWorkspaceKey({ id: -1337, name: "browser" }), "name:browser")
+  assert.equal(Model.normalizeWorkspaceKey({ id: -1338, name: "special:scratchpad", special: true }), null)
+  assert.equal(Model.normalizeWorkspaceKey("special:scratchpad"), null)
+  assert.equal(Model.normalizeWorkspaceKey("name:special:scratchpad"), null)
+  assert.equal(Model.normalizeWorkspaceKey("special"), null)
+  assert.equal(Model.normalizeWorkspaceKey("bad\nname"), null)
+  assert.equal(Model.workspaceLabel("name:browser"), "browser")
   assert.equal(Model.normalizeWorkspaceId(0), null)
   assert.equal(Model.normalizeWorkspaceId(-3), null)
   assert.equal(Model.normalizeWorkspaceId(1000), null)
@@ -516,10 +529,111 @@ test("switching profiles releases workspaces the previous profile had claimed", 
   assert.ok(!lua.includes('W.set_workspace("3", "lua:omarchy-wsl-focus")'))
 })
 
+test("repeated workspace syncs update an existing rule in place",
+  { skip: luaAvailable ? false : "lua interpreter not installed" }, () => {
+    const first = Model.generateLua({
+      layouts: [{ id: "focus", name: "Focus", weights: [25, 50, 25] }],
+      profiles: [{ name: "work", fallback: "dwindle", assignments: { 1: "focus" } }],
+      activeProfile: "work"
+    }, [1])
+    const second = Model.generateLua({
+      layouts: [{ id: "wide", name: "Wide", weights: [60, 40] }],
+      profiles: [{ name: "work", fallback: "dwindle", assignments: { 1: "wide" } }],
+      activeProfile: "work"
+    }, [1])
+
+    // Hyprland upserts workspace rules by selector. Seed an existing rule with
+    // fields the plugin does not own so the regression catches disabling or
+    // replacing it during the second generated sync.
+    const source = [
+      'local rules_by_selector = { ["1"] = { workspace = "1", layout = "dwindle", enabled = true, monitor = "DP-1", persistent = true } }',
+      'rules_by_selector["1"].set_enabled = function(self, enabled) self.enabled = enabled end',
+      "hl = { layout = { register = function() end },",
+      "  workspace_rule = function(spec)",
+      "    local existing = rules_by_selector[spec.workspace]",
+      "    if existing then existing.layout = spec.layout; return existing end",
+      "    spec.enabled = true; rules_by_selector[spec.workspace] = spec; return spec",
+      "  end,",
+      "  dispatch = function() end, dsp = { layout = function() end, window = { move = function() end } } }",
+      first,
+      'local original = W.rules["1"]',
+      second,
+      'local updated = W.rules["1"]',
+      'assert(updated == original, "same selector must reuse the existing rule")',
+      'assert(updated.enabled == true, "sync must leave the rule enabled")',
+      'assert(updated.monitor == "DP-1", "sync must preserve the monitor")',
+      'assert(updated.persistent == true, "sync must preserve persistence")',
+      'assert(updated.layout == "lua:omarchy-wsl-wide", "sync must update the layout")',
+      'print("ok")'
+    ].join("\n")
+
+    assert.equal(runLua(source).trim(), "ok")
+  })
+
 test("a workspace that exists but is past 10 still gets a rule", () => {
   const ids = Model.managedWorkspaceIds(Model.defaultConfig(), [42])
   assert.ok(ids.includes("42"))
   assert.deepEqual(ids.slice(0, 3), ["1", "2", "3"])
+})
+
+test("named live workspaces get stable rules", () => {
+  const config = Model.normalizeConfig({
+    layouts: [{ id: "focus", name: "Focus", weights: [25, 50, 25] }],
+    profiles: [{ name: "work", fallback: "dwindle", assignments: { "name:browser": "focus" } }],
+    activeProfile: "work"
+  })
+  const ids = Model.managedWorkspaceIds(config, [
+    { id: -1337, name: "browser" },
+    { id: -1339, name: "code" }
+  ])
+  assert.deepEqual(ids, ["name:browser", "name:code"])
+  const lua = Model.generateLua(config, [
+    { id: -1337, name: "browser" },
+    { id: -1339, name: "code" }
+  ])
+  assert.match(lua, /W\.set_workspace\("name:browser", "lua:omarchy-wsl-focus"\)/)
+  assert.match(lua, /W\.set_workspace\("name:code", "dwindle"\)/)
+})
+
+test("named workspace keys flow through pins, autostart, commands, and state", () => {
+  const config = Model.normalizeConfig({
+    layouts: [{ id: "focus", name: "Focus", weights: [25, 50, 25] }],
+    profiles: [{
+      name: "work",
+      fallback: "dwindle",
+      assignments: { "name:browser": "focus" },
+      pins: { firefox: { workspace: "name:browser", slots: [2] } },
+      autostart: ["name:browser", 3]
+    }],
+    activeProfile: "work"
+  })
+
+  assert.equal(Model.layoutIdForWorkspace(config, "browser"), "focus")
+  assert.deepEqual(Model.pinsForWorkspace(config, "name:browser").map((pin) => pin.workspace), ["name:browser"])
+  assert.deepEqual(Model.slotApps(config, "browser"), [[], ["firefox"]])
+  assert.equal(Model.isAutostart(config, "browser"), true)
+  assert.deepEqual(Model.toggledAutostart(["3"], "browser"), ["3", "name:browser"])
+  assert.deepEqual(Model.withoutAutostart(["3", "name:browser"], "browser"), ["3"])
+  assert.equal(Model.launchAppLua("firefox", "browser"),
+    'hl.exec_cmd("firefox", { workspace = "name:browser silent" })')
+  assert.equal(Model.focusWorkspaceCommand("browser"),
+    "hyprctl dispatch 'hl.dsp.focus({ workspace = \"name:browser\" })'")
+  assert.match(Model.focusWorkspaceCommand('name:Dev "Tools'), /workspace = "name:Dev \\"Tools"/)
+  assert.ok(!Model.terminalClassFor("nvim", "browser").includes(":"))
+  assert.notEqual(Model.terminalClassFor("nvim", "foo-bar"), Model.terminalClassFor("nvim", "foobar"))
+  assert.ok(Model.gatherAppLua("firefox", "browser").includes('{ workspace = "name:browser"'))
+  assert.match(Model.statusLine(config, "browser", ""), /workspace browser · Focus/)
+
+  const lua = Model.generateLua(config, [{ id: -1337, name: "browser" }])
+  assert.match(lua, /W\.set_workspace\("name:browser", "lua:omarchy-wsl-focus"\)/)
+  assert.match(lua, /W\.set_app\("firefox", .*"name:browser"\)/)
+  assert.match(lua, /W\.set_slot\("name:browser", "firefox", \{ 2 \}\)/)
+
+  const state = Model.stateJson(config, { "name:browser": "DP-1" }, [{ id: -1337, name: "browser" }])
+  const browser = state.workspaces.find((workspace) => workspace.workspace === "name:browser")
+  assert.equal(browser.layout, "focus")
+  assert.equal(browser.monitor, "DP-1")
+  assert.equal(browser.autostart, true)
 })
 
 test("the live preview payload is a no-op when the runtime is not loaded", () => {
@@ -802,6 +916,22 @@ test("a targeted window takes its slot and the rest close ranks",
     assert.equal(lines[2], "1,2")
     // Two windows of the same class: one gets the slot, the other queues.
     assert.equal(lines[3], "2,1")
+  })
+
+test("Lua slot assignment resolves named live workspaces",
+  { skip: luaAvailable ? false : "lua interpreter not installed" }, () => {
+    const source = [
+      lua_prelude(),
+      Model.LUA_RUNTIME,
+      'W.slots = { ["name:browser"] = { firefox = { 2 } } }',
+      'local targets = {',
+      '  { window = { class = "firefox", workspace = { id = -1337, name = "browser" } } },',
+      '  { window = { class = "foot", workspace = { id = -1337, name = "browser" } } }',
+      '}',
+      'local out = W.assign(targets, 2)',
+      'print(out[1] .. "," .. out[2])'
+    ].join("\n")
+    assert.equal(runLua(source).trim(), "2,1")
   })
 
 test("a place is claimed only on the workspace it was pinned to",
@@ -1164,10 +1294,10 @@ test("a marked workspace opens itself, and only what it is short of", () => {
 })
 
 test("the workspaces that open at login are the profile's own", () => {
-  // Written by hand, in whatever shape the hand felt like: numbers, strings,
-  // duplicates, and ids no workspace can have.
+  // Written by hand, in whatever shape the hand felt like: numbers, named
+  // selectors, duplicates, and ids no workspace can have.
   const profile = Model.normalizeProfile({ name: "d", autostart: [9, "3", 3, 0, 200, "x"] }, [])
-  assert.deepEqual(profile.autostart, ["3", "9"])
+  assert.deepEqual(profile.autostart, ["3", "9", "name:x"])
   assert.deepEqual(Model.normalizeProfile({ name: "d" }, []).autostart, [])
   assert.deepEqual(Model.normalizeProfile({ name: "d", autostart: "yes" }, []).autostart, [])
 

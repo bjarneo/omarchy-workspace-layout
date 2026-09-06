@@ -2,6 +2,7 @@
 
 Everything the plugin does, in one list.
 
+- Use numeric or named workspaces for layouts, app pins, and startup entries
 - Decide how a Hyprland workspace splits its screen, by dragging the dividers
   rather than resizing windows one at a time
 - Save a shape as a layout, give it a name, and reuse it on any workspace

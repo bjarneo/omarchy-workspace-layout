@@ -124,9 +124,9 @@ Established by probing 0.56.2; the Lua stubs are at `/usr/share/hypr/stubs/hl.me
 - Registering the same name twice raises. This file is re-run on every config
   reload, so registration is remembered in `_G` for the compositor's lifetime and
   behaviour updates through `W.specs` instead.
-- Workspace rules accumulate; a second rule for a workspace does not retire the
-  first, and `hyprctl workspaces` reports the stale one. Keep the handle and
-  `:set_enabled(false)` the previous rule.
+- `hl.workspace_rule({ workspace = ..., layout = ... })` updates an existing
+  selector in place. Reissuing a rule preserves fields such as `monitor`,
+  `persistent`, and `enabled`; do not disable the previous returned handle.
 - Changing a spec does not re-tile anything. `hl.dispatch(hl.dsp.layout(msg))`
   reaches the *active* workspace's layout only, and raises on a workspace running
   a built-in — hence the `pcall` in `W.relayout`.
