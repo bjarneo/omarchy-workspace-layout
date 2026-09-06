@@ -1865,6 +1865,67 @@ test("slot lists arrive from a shell in whatever shape the shell felt like", () 
   assert.deepEqual(Model.parseSlots(null), [])
 })
 
+// ------------------------------------------------ Super+L / Omarchy toggle
+//
+// Omarchy's SUPER+L writes one Lua workspace rule per workspace under
+// ~/.local/state/omarchy/workspace-layouts. The plugin used to ignore those
+// files, so the bar stayed on dwindle after the compositor had already moved.
+
+test("Omarchy's Super+L rule files parse into workspace layout pairs", () => {
+  const text = [
+    'hl.workspace_rule({ workspace = "6", layout = "scrolling" })',
+    'hl.workspace_rule({ workspace = "1", layout = "dwindle" })',
+    'hl.workspace_rule({ workspace = "9", layout = "lua:omarchy-wsl-focus" })',
+    "garbage"
+  ].join("\n")
+  assert.deepEqual(Model.parseOmarchyToggleFiles(text), [
+    { workspace: "6", layout: "scrolling" },
+    { workspace: "1", layout: "dwindle" }
+  ])
+  assert.deepEqual(Model.parseOmarchyToggleFiles(""), [])
+  assert.deepEqual(Model.parseOmarchyToggleLua(
+    'hl.workspace_rule({ workspace = "2", layout = "master" })'
+  ), { workspace: "2", layout: "master" })
+  assert.equal(Model.parseOmarchyToggleLua("not a rule"), null)
+})
+
+test("Super+L scrolling is written into the active profile", () => {
+  const config = Model.normalizeConfig({
+    profiles: [{ name: "default", fallback: "dwindle", assignments: { 6: "dwindle" } }]
+  })
+  const next = Model.followOmarchyToggles(config, [{ workspace: 6, layout: "scrolling" }])
+  assert.equal(Model.layoutIdForWorkspace(next, 6), "scrolling")
+  assert.equal(next.profiles[0].assignments["6"], "scrolling")
+  assert.match(Model.generateLua(next, [6]), /W\.set_workspace\("6", "scrolling"\)/)
+})
+
+test("a Super+L file that already matches is a no-op", () => {
+  const config = Model.normalizeConfig({
+    profiles: [{ name: "default", fallback: "dwindle", assignments: { 6: "scrolling" } }]
+  })
+  assert.equal(Model.followOmarchyToggles(config, [{ workspace: 6, layout: "scrolling" }]), null)
+})
+
+test("startup import does not steal a custom layout from a stale Super+L file", () => {
+  const config = Model.normalizeConfig({
+    layouts: [{ id: "focus", name: "Focus", weights: [25, 50, 25] }],
+    profiles: [{ name: "default", fallback: "dwindle", assignments: { 6: "focus" } }]
+  })
+  assert.equal(
+    Model.followOmarchyToggles(config, [{ workspace: 6, layout: "scrolling" }], { onlyBuiltins: true }),
+    null
+  )
+  const live = Model.followOmarchyToggles(config, [{ workspace: 6, layout: "scrolling" }])
+  assert.equal(Model.layoutIdForWorkspace(live, 6), "scrolling")
+})
+
+test("the panel and the service follow Omarchy's Super+L files", () => {
+  const panel = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  const service = fs.readFileSync(path.join(__dirname, "..", "Service.qml"), "utf8")
+  assert.match(panel, /OmarchyToggleFollow/)
+  assert.match(service, /OmarchyToggleFollow/)
+})
+
 // ----------------------------------------------------------------- loader
 
 test("the Hyprland loader line is added once and only once", () => {

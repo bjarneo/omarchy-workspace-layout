@@ -47,6 +47,8 @@ Everything the plugin does, in one list.
 - The tile you are carrying follows the cursor with its name and target
 - The bar icon is a live miniature of the layout the focused workspace is
   running
+- Omarchy's Super+L dwindle/scrolling toggle is followed, so the bar and the
+  panel match the workspace Hyprland is actually tiling
 - Clicking a workspace takes you to it
 - The panel scrolls when it grows taller than the screen
 - Restore defaults puts back the shipped layouts, one profile, and every

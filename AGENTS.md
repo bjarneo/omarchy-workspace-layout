@@ -195,6 +195,13 @@ Established by probing 0.56.2; the Lua stubs are at `/usr/share/hypr/stubs/hl.me
 - A `FileView` watching a path that does not exist yet can emit neither
   `onLoaded` nor `onLoadFailed`, so `ConfigStore` has a fallback timer. Without
   it, a first run never becomes ready and nothing downstream ever runs.
+- **Omarchy's SUPER+L is a separate writer.** It persists
+  `~/.local/state/omarchy/workspace-layouts/<id>.lua` and applies a workspace
+  rule immediately. This plugin's generated file loads *after* those rules and
+  used to overwrite them with whatever the JSON last said. `OmarchyToggleFollow`
+  reads the directory (inotify + a startup `cat`) and writes Super+L's builtin
+  into the active profile. A live write always wins; the startup scan will not
+  steal a workspace that already has one of this plugin's layouts.
 
 **Editing a shipped layout forks it.** `Panel.forkPreset` runs inside the same
 `store.stage`/`store.mutate` as the edit, so the copy and the change land in one
