@@ -31,8 +31,8 @@ Everything the plugin does, in one list.
 - Drag the divider at every level, including the one inside a split
 - Dividers snap to halves, thirds, quarters, fifths and the golden ratio; hold
   Shift to drag free
-- Extra windows become real places instead of a temporary stack while you work
-  in the panel
+- Extra windows past the last place are drawn stacked and can be clicked and
+  given apps; one button writes them into the shape when you want them kept
 - Editing a shipped layout makes a copy called custom-xxxx and leaves the
   original alone
 - Capture builds a layout plus pins from the windows already on screen

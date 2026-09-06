@@ -74,17 +74,20 @@ Double-click a divider to even everything out. A slot that has been split has a
 divider inside it too, running the other way; drag that to make the halves
 uneven.
 
-**Extra windows become real places.** Overflow is a drawing rule: five windows
-in a three-place layout are *shown* stacked, and the moment one closes the stack
-is gone — nothing to pin an app to, no divider to drag. So while you have the
-workspace open in the panel, the drawing is written down: the layout grows to
-hold what is actually open, exactly as it was already being drawn, and those
-places stay put afterwards. A shipped layout forks first, so `Even` stays
-`Even`.
+**Extra windows are drawn, and kept only if you ask.** Overflow is a drawing
+rule: five windows in a three-place layout are *shown* stacked, and the canvas
+draws every one of them — you can click those tiles and give them apps. Close a
+window and the stack is gone again, because the layout never changed.
 
-The `extra →` setting still decides *how* it grows — stacked into the last slot,
-the first, or as new slots beside them — and `fewer →` still decides what the
-shape does when a window closes.
+If you want them to stay — a divider of their own to drag, a place that is
+there when nothing is open — `keep 5 places` appears in the shape row and
+writes the drawing down. It is a button and nothing else: a layout is a
+document, and what happens to be open on the workspace is not an edit to it.
+A shipped layout forks first, so `Even` stays `Even`.
+
+The `extra →` setting decides *how* the drawing stacks — into the last slot,
+the first, or as new slots beside them — and `fewer →` decides what the shape
+does when a window closes.
 
 **Shape row.** Add or remove a slot, flip between columns and rows, split evenly,
 and choose where windows past the last slot go. The count reads `3 cols · 4

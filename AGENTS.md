@@ -46,12 +46,23 @@ pin from the new fill order. Patching place numbers in place is the version of
 this that looks simpler and silently scrambles the pins, because removing one
 place renumbers all the others.
 
-**Overflow is a drawing rule, and the panel writes it down.**
-`growSelectedForWindows` grows the *edited* workspace's layout to hold the
-windows actually open, following that layout's own overflow rule so the picture
-does not jump (it shifts by less than the two decimals the document stores).
-Only the selected workspace, never mid-drag, and through `editSelectedLayout`
-so a preset forks first. It cannot loop: after growing, places equals windows.
+**Overflow is a drawing rule, and it stays one.** The canvas asks `slotRects`
+for `drawnCount` places — the larger of the shape and the windows open — so the
+stacking overflow would make is already drawn, clickable and pinnable without
+the document knowing about it. `keepOverflowPlaces` writes that drawing down,
+following the layout's own overflow rule so the picture does not jump (it
+shifts by less than the two decimals the document stores), and it is reachable
+from its button and from nowhere else.
+
+That last part is the whole lesson. It used to run on a workspace switch, on
+the 700ms window poll and on the login furnishing, which meant opening a sixth
+window on a three-slot workspace rewrote the shape — with the panel *shut*,
+because `onFocusedWorkspaceIdChanged` follows the focused workspace while
+closed. Three things then follow from a shape with more places than weights:
+`editSelectedLayout` forks the preset it came from, the underfill button hides
+itself, and `ratioRects` reads the extra places as a deliberate split and holds,
+so `rescale` is gone for good. A layout is a document. What is open on the
+workspace right now is not an edit to it.
 
 **Dragging a stacked divider materialises the stack.** A slot showing three
 windows because overflow put them there has no stored ratio, so the drag writes

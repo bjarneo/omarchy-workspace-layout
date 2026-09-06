@@ -239,15 +239,26 @@ Panel {
     return pinNames[match] || appNames[match] || match
   }
 
-  // Working from the panel, the shape describes what is actually open: a
-  // window past the last place stops being a stack the drawing invents and
-  // becomes a place the layout keeps — with a divider to drag and somewhere to
-  // pin an app. Only for the workspace being edited, and never mid-drag.
-  function growSelectedForWindows() {
+  // Windows past the last place are a drawing rule, and the canvas draws them
+  // on its own: `drawnCount` asks slotRects for the stacking overflow would
+  // make, so the extra tiles are already there to look at, click and pin to.
+  //
+  // This writes that drawing down, and it is a button rather than something
+  // the panel does on its own. A layout is a document: what is open on the
+  // workspace right now is not an edit to it, and growing it behind the user's
+  // back rewrote a shape they had built — forking the preset it came from,
+  // hiding the underfill choice, and turning `rescale` into `hold` for good,
+  // because a grown shape has more places than weights and `ratioRects` reads
+  // that as a deliberate split.
+  readonly property bool canKeepOverflowPlaces: selectedLayout !== null
+    && selectedLayout.kind !== "grid"
+    && selectedWindowCount > Model.totalCells(selectedLayout.cells)
+    && Model.totalCells(selectedLayout.cells) < Model.MAX_SLOTS
+
+  function keepOverflowPlaces() {
     var layout = selectedLayout
-    if (!layout || layout.kind === "grid" || canvas.dragging) return
+    if (!canKeepOverflowPlaces || canvas.dragging) return
     var windows = selectedWindowCount
-    if (windows <= Model.totalCells(layout.cells)) return
     editSelectedLayout(function(draft) {
       var shape = Model.growForCount(draft.weights, draft.cells, draft.overflow, windows)
       draft.weights = shape.weights
@@ -278,10 +289,7 @@ Panel {
   }
 
   onAppQueryChanged: refreshAppState()
-  onSelectedWorkspaceChanged: {
-    refreshAppState()
-    growSelectedForWindows()
-  }
+  onSelectedWorkspaceChanged: refreshAppState()
   onRunningAppsChanged: {
     rebuildCatalog()
     refreshAppState()
@@ -1197,11 +1205,9 @@ Panel {
           }
           // Opening or closing a window changes what the workspace is short
           // of. Never while a divider is moving: rebuilding the rows under a
-          // drag is what made dragging feel broken.
-          if (!canvas.dragging) {
-            root.refreshAppState()
-            root.growSelectedForWindows()
-          }
+          // drag is what made dragging feel broken. It refreshes the rows and
+          // nothing else — a window opening is not an edit to the layout.
+          if (!canvas.dragging) root.refreshAppState()
         } catch (error) {
           root.tiledCounts = ({})
           root.runningApps = []
@@ -1974,6 +1980,21 @@ Panel {
                 color: Util.alpha(root.fg, 0.5)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
+              }
+
+              Button {
+                // The canvas is already drawing the stacked windows; this is
+                // the offer to keep them. Only ever a click — the shape is not
+                // rewritten because a window opened.
+                visible: root.canKeepOverflowPlaces
+                foreground: root.fg
+                accent: root.accent
+                bordered: true
+                fontSize: Style.font.caption
+                verticalPadding: Style.spacing.xs
+                text: "keep " + root.selectedWindowCount + " places"
+                tooltipText: "Write the extra windows into the shape, so they get dividers to drag"
+                onClicked: root.keepOverflowPlaces()
               }
             }
           }

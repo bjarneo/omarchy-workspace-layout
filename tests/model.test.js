@@ -1776,11 +1776,14 @@ test("the canvas offers a handle for a cross-grain divider", () => {
   assert.match(qml, /onCellWeightsChanged: function\(slot, parts\) \{ root\.stageCells\(slot, parts\) \}/)
 })
 
-test("a window past the last place becomes a place, not a stack", () => {
-  // Overflow is a drawing rule: five windows in a three-place layout are shown
-  // stacked, and the moment one closes the stack is gone. Working from the
-  // panel that is wrong — the extra windows have nowhere to be pinned and no
-  // divider to drag — so the drawing is written down.
+test("a window opening never edits the layout", () => {
+  // Overflow is a drawing rule and it stays one. The canvas draws the stacking
+  // from its own `drawnCount`, so the extra tiles are there to click and pin
+  // to without the document knowing anything about them. Writing them down is
+  // an offer — `keepOverflowPlaces` behind a button — because a grown shape
+  // has more places than weights, and everything downstream reads that as a
+  // deliberate split: the underfill choice disappears and `rescale` becomes
+  // `hold` for good. Doing that because a window opened cost people layouts.
   const stacked = Model.growForCount([50, 50], [1, 1], "last", 4)
   assert.deepEqual(stacked.cells.map((c) => c.length), [1, 3])
   assert.deepEqual(Model.growForCount([50, 50], [1, 1], "first", 4).cells.map((c) => c.length), [3, 1])
@@ -1806,9 +1809,16 @@ test("a window past the last place becomes a place, not a stack", () => {
   }
 
   const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
-  assert.match(qml, /function growSelectedForWindows\(\)/)
-  // Only the workspace being edited, and never mid-drag.
-  assert.match(qml, /if \(!layout \|\| layout\.kind === "grid" \|\| canvas\.dragging\) return/)
+  assert.match(qml, /function keepOverflowPlaces\(\)/)
+  // The whole point: it is reachable from a click and from nowhere else. A
+  // workspace switch, the 700ms window poll and the login furnishing all used
+  // to call it, which is how a layout got rewritten with the panel shut.
+  const calls = qml.match(/keepOverflowPlaces\(\)/g) || []
+  assert.equal(calls.length, 2, "declaration and one caller")
+  assert.match(qml, /onClicked: root\.keepOverflowPlaces\(\)/)
+  assert.doesNotMatch(qml, /onSelectedWorkspaceChanged: \{/)
+  // And the count poll refreshes the rows only.
+  assert.match(qml, /if \(!canvas\.dragging\) root\.refreshAppState\(\)/)
 })
 
 test("a cross-grain divider is dragged the same way as any other", () => {
