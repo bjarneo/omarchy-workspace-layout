@@ -100,6 +100,23 @@ place. For the same reason a terminal app's generated class carries the
 workspace (`omarchy.wsl.cliamp.ws8`): two pins of one program need two classes,
 or the window rule cannot tell them apart.
 
+**A catch is a pin turned the other way round.** A pin says *which workspace* an
+app belongs to (`W.set_app`, a window rule, the app is moved). A catch says
+*which place* (`W.set_slot` only, nothing is moved), and it hangs off the
+**layout**, so `generateLua` expands one rule onto every workspace running that
+shape. Catches are emitted *before* pins because both write `W.slots[ws][class]`
+and the last line wins — the pin is the more specific claim.
+
+They live on the profile keyed by layout id (`profile.catches[layoutId]`), not
+on the layout: layouts are shared between profiles, and switching profiles is
+meant to change which apps live where. Two consequences that are easy to miss —
+`forkPreset` has to copy them, because the id they are keyed by is the thing it
+just changed; and a place number is a place number, so a drop or a swap has to
+renumber them alongside the pins. `movedCatches`/`swappedCatches` do that by
+handing them to the pin functions dressed as pins, which works because the shape
+those produce is built from weights and parts and never from what is sitting in
+them.
+
 **Three ways to name a place, and they are not the same.** A tile's number is
 its index in fill order (what a pin stores). `rectSlotPositions` maps that to
 the *positional* slot in `weights`, which is what a shape edit needs. And the

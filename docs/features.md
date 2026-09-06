@@ -13,6 +13,8 @@ Everything the plugin does, in one list.
 - Pin an app to a workspace so it opens there wherever you launch it from,
   using a Hyprland window rule
 - Pin an app to a numbered place, or to several places at once
+- Or catch one: give a *layout* a place for an app, kept on every workspace
+  running that shape, with nothing moved anywhere
 - Put several apps in one place; whichever is open takes it
 - Search every app installed on the machine, not just what is running
 - Read names and launch commands from desktop entries

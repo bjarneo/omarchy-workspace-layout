@@ -862,6 +862,153 @@ test("the generated file installs a window rule per pin and clears the rest", ()
   assert.ok(!/^W\.set_app\(/m.test(cleared))
 })
 
+test("a layout keeps a place for an app without moving it anywhere", () => {
+  // The other half of #6: a pin answers "which workspace", a catch answers
+  // "which place". An app you want on six workspaces cannot be pinned to one
+  // of them, but every one of those workspaces can keep it a place.
+  const config = Model.normalizeConfig({
+    layouts: [{ id: "split", name: "Split", weights: [50, 50] }],
+    profiles: [{
+      name: "work",
+      fallback: "dwindle",
+      assignments: { 3: "split", 7: "split", 4: "dwindle" },
+      catches: { split: { kitty: [2] } }
+    }],
+    activeProfile: "work"
+  })
+
+  const lua = Model.generateLua(config, [], {})
+  assert.match(lua, /W\.set_slot\("3", "kitty", \{ 2 \}\)/)
+  assert.match(lua, /W\.set_slot\("7", "kitty", \{ 2 \}\)/)
+  assert.doesNotMatch(lua, /W\.set_slot\("4", "kitty"/)
+  // Nothing is moved: a catch is slot targeting and not a window rule, which
+  // is the entire difference between it and a pin.
+  assert.doesNotMatch(lua, /W\.set_app\("kitty"/)
+
+  // It follows the shape rather than the workspace: give the layout to another
+  // workspace and the place comes with it.
+  const moved = Model.normalizeConfig({
+    layouts: [{ id: "split", name: "Split", weights: [50, 50] }],
+    profiles: [{
+      name: "work", fallback: "dwindle",
+      assignments: { 9: "split" },
+      catches: { split: { kitty: [2] } }
+    }],
+    activeProfile: "work"
+  })
+  assert.match(Model.generateLua(moved, [], {}), /W\.set_slot\("9", "kitty", \{ 2 \}\)/)
+
+  // The panel draws both kinds of claim in the tile they hold.
+  assert.deepEqual(Model.slotApps(config, 3), [[], ["kitty"]])
+  assert.deepEqual(Model.slotApps(config, 4), [])
+  assert.match(Model.statusLine(config, 3, ""), /caught kitty@2/)
+})
+
+test("a caught app takes its place on the layout's workspaces and nowhere else",
+  { skip: luaAvailable ? false : "lua interpreter not installed" }, () => {
+    const config = Model.normalizeConfig({
+      layouts: [{ id: "split", name: "Split", weights: [50, 50] }],
+      profiles: [{
+        name: "work", fallback: "dwindle",
+        assignments: { 3: "split" },
+        catches: { split: { kitty: [2] } }
+      }],
+      activeProfile: "work"
+    })
+    const output = runLua([
+      lua_prelude(),
+      Model.generateLua(config, [], {}),
+      "local W = _G.__omarchy_wsl",
+      "local function pick(ws)",
+      "  local targets = {",
+      '    { window = { class = "kitty",    workspace = { id = ws } } },',
+      '    { window = { class = "chromium", workspace = { id = ws } } }',
+      "  }",
+      "  local out = W.assign(targets, 2)",
+      '  return out[1] .. "," .. out[2]',
+      "end",
+      "print(pick(3))",
+      "print(pick(5))",
+      "print(#PINS)"
+    ].join("\n"))
+    const lines = output.trim().split("\n")
+    // Kitty opened first and still took the second place, because the shape
+    // was keeping it — chromium closed ranks into the one it left.
+    assert.equal(lines[0], "2,1")
+    // Workspace 5 runs dwindle, so nothing was kept and they arrive in order.
+    assert.equal(lines[1], "1,2")
+    // And not one window rule: a catch never moves anything.
+    assert.equal(lines[2], "0")
+  })
+
+test("a pin beats a catch, because it names the workspace", () => {
+  // Both write W.slots[ws][class], and the later line wins, so the more
+  // specific claim has to be emitted last.
+  const config = Model.normalizeConfig({
+    layouts: [{ id: "split", name: "Split", weights: [50, 50] }],
+    profiles: [{
+      name: "work", fallback: "dwindle",
+      assignments: { 3: "split" },
+      catches: { split: { kitty: [2] } },
+      pins: { kitty: { workspace: 3, slots: [1] } }
+    }],
+    activeProfile: "work"
+  })
+  const lua = Model.generateLua(config, [], {})
+  const caught = lua.indexOf('W.set_slot("3", "kitty", { 2 })')
+  const pinned = lua.indexOf('W.set_slot("3", "kitty", { 1 })')
+  assert.ok(caught >= 0 && pinned >= 0, "both claims are written")
+  assert.ok(pinned > caught, "the pin is applied after the catch")
+})
+
+test("a catch is refused everywhere it could not mean anything", () => {
+  const config = Model.normalizeConfig({
+    layouts: [{ id: "split", name: "Split", weights: [50, 50] }],
+    profiles: [{
+      name: "work", fallback: "dwindle",
+      catches: {
+        split: { kitty: [2], foot: [], ghostty: [99], "": [1] },
+        // A layout that was deleted, and one of Hyprland's own — a place
+        // number means nothing in either.
+        gone: { kitty: [1] },
+        dwindle: { kitty: [1] }
+      }
+    }],
+    activeProfile: "work"
+  })
+  const kept = Model.normalizeConfig(config).profiles[0].catches
+  assert.deepEqual(Object.keys(kept), ["split"])
+  assert.deepEqual(Object.keys(kept.split), ["kitty"])
+  assert.deepEqual(kept.split.kitty.slots, [2])
+
+  // The short form is the whole rule, so the JSON stays hand-writable.
+  assert.deepEqual(Model.normalizeCatch([1, 2]).slots, [1, 2])
+  // And the long one carries the readable name a raw class cannot say.
+  const named = Model.normalizeCatch({ slots: [2, 1, 2], name: "Kitty" })
+  assert.deepEqual(named.slots, [1, 2])
+  assert.equal(named.name, "Kitty")
+  assert.equal(Model.normalizeCatch([]), null)
+})
+
+test("a catch is a place number, so a drop renumbers it with the pins", () => {
+  // The bug AGENTS.md warns about, one level over: remove a place and every
+  // other number moves. A catch that was not renumbered would quietly point
+  // at someone else's tile.
+  const layout = { id: "split", name: "Split", weights: [50, 50], cells: [1, 1] }
+  const rules = { kitty: { slots: [2] }, foot: { slots: [1] } }
+  const swapped = Model.swappedCatches(rules, 1, 2)
+  assert.deepEqual(swapped.kitty.slots, [1])
+  assert.deepEqual(swapped.foot.slots, [2])
+  // The name survives the round trip through a pin, which has nowhere to keep it.
+  assert.equal(Model.swappedCatches({ kitty: { slots: [1], name: "Kitty" } }, 1, 2).kitty.name,
+    "Kitty")
+  // A drop reshapes and renumbers in one go, exactly as it does for pins.
+  const dropped = Model.movedCatches(layout, rules, 1, 2, "bottom")
+  assert.ok(dropped !== null, "the drop was accepted")
+  assert.ok(dropped.kitty.slots.length > 0 && dropped.foot.slots.length > 0,
+    "both claims survive with places")
+})
+
 test("a slot reaches the layout as a class it can compare, or not at all", () => {
   const config = Model.normalizeConfig({
     profiles: [{
@@ -1130,6 +1277,25 @@ test("the app lists are not rebuilt on every frame of a drag", () => {
   // in the Apps section would be destroyed and recreated sixty times a second.
   assert.match(qml, /function refreshAppState\(\)/)
   assert.match(qml, /if \(!canvas\.dragging\) root\.refreshAppState\(\)/)
+})
+
+test("catching an app is wired to the same click that pins one", () => {
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  assert.match(qml, /function catchApp\(match, name\)/)
+  assert.match(qml, /function writeCatch\(draft, layoutId, match, slots, name\)/)
+  // One entry point, so the search field and the app rows cannot drift apart
+  // about which kind of claim a click makes.
+  assert.match(qml, /function claimApp\(match, name\)/)
+  assert.match(qml, /if \(catching\) catchApp\(match, name\)/)
+  assert.match(qml, /onClicked: root\.claimApp\(/)
+  // A catch edits the layout, so a preset forks first — and the fork carries
+  // the catches, which are keyed by the id that just changed.
+  assert.match(qml, /target\.catches\[id\] = JSON\.parse\(JSON\.stringify\(target\.catches\[sourceId\]\)\)/)
+  // And a drop renumbers them alongside the pins.
+  assert.match(qml, /Model\.movedCatches\(layout, rules, from, to, edge\)/)
+  assert.match(qml, /Model\.swappedCatches\(rules, from, to\)/)
+  // A new profile takes them with it, the way it takes the pins.
+  assert.match(qml, /catches: source && source\.catches \? JSON\.parse/)
 })
 
 test("a new profile inherits the pins it was copied from", () => {
@@ -1947,7 +2113,7 @@ test("every command the CLI documents is answered by the panel", () => {
   const commands = [
     "open", "close", "show", "hide", "toggle",
     "status", "workspace", "json", "profiles", "apply", "layouts",
-    "set", "reset", "pin", "unpin", "capture", "launch"
+    "set", "reset", "pin", "unpin", "catchapp", "capture", "launch"
   ]
   for (const name of commands) {
     assert.match(qml, new RegExp(`function ${name}\\(`), `ipc ${name}`)

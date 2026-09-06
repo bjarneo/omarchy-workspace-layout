@@ -42,6 +42,14 @@ Panel {
   // first — one shape everywhere — and per-workspace is the exception.
   property string assignTarget: "workspace"
 
+  // Where the next app click lands. "workspace" writes a pin — the app is
+  // moved to this workspace and takes the place aimed at. "layout" writes a
+  // catch on the layout this workspace is running: the app is not moved
+  // anywhere, it just takes that place on every workspace running the shape.
+  // The same shape of choice as `assignTarget`, one level down.
+  property string pinTarget: "workspace"
+  readonly property bool catching: pinTarget === "layout"
+
   // Two-step destructive actions: the first press arms, the second commits.
   property string armedDelete: ""
   readonly property bool armedRestore: armedDelete === "restore"
@@ -145,12 +153,15 @@ Panel {
       out.push({ key: "even", label: "Even out the split" })
     }
     out.push({ key: "add", label: "Put an app here" })
-    for (var i = 0; i < pinnedHere.length; i++) {
-      if (pinnedHere[i].slots.indexOf(menuSlot) !== -1) {
-        out.push({ key: "clear", label: "Clear the apps here" })
-        break
-      }
+    var claimed = false
+    var i
+    for (i = 0; i < pinnedHere.length; i++) {
+      if (pinnedHere[i].slots.indexOf(menuSlot) !== -1) claimed = true
     }
+    for (i = 0; i < caughtHere.length; i++) {
+      if (caughtHere[i].slots.indexOf(menuSlot) !== -1) claimed = true
+    }
+    if (claimed) out.push({ key: "clear", label: "Clear the apps here" })
     return out
   }
 
@@ -158,6 +169,7 @@ Panel {
   // document on every frame, and a bound list would rebuild all of these rows
   // sixty times a second while the user is trying to aim a divider.
   property var pinnedHere: []
+  property var caughtHere: []
   property var slotApps: []
   property var appRows: ({ rows: [], hidden: 0 })
   property var missingApps: []
@@ -272,10 +284,17 @@ Panel {
     for (var p = 0; p < all.length; p++) {
       if (all[p].name !== "") named[all[p].match] = all[p].name
     }
+    // A caught app may never have been pinned anywhere, so its readable name
+    // has to come from its catch or the canvas prints a raw class.
+    var caught = Model.catchedApps(config)
+    for (var c = 0; c < caught.length; c++) {
+      if (caught[c].name !== "" && !named[caught[c].match]) named[caught[c].match] = caught[c].name
+    }
     pinNames = named
 
     pinnedHere = Model.pinsForWorkspace(config, selectedWorkspace)
-    var slots = Model.slotApps(config, selectedWorkspace)
+    caughtHere = Model.catchesForWorkspace(config, selectedWorkspace, selectedMonitor)
+    var slots = Model.slotApps(config, selectedWorkspace, selectedMonitor)
     var labelled = []
     for (var i = 0; i < slots.length; i++) {
       var names = []
@@ -404,6 +423,13 @@ Panel {
     // layout now, and the field under the library is there to rename it.
     copy.name = Model.uniqueLayoutName(draft, "Custom")
     draft.layouts.push(copy)
+    // The catches come with it. They are keyed by layout id, so a copy that
+    // did not carry them would silently lose every place the shape was
+    // keeping — the fork happens mid-drag and nobody would connect the two.
+    var target = Model.findProfile(draft, draft.activeProfile)
+    if (target && target.catches && target.catches[sourceId]) {
+      target.catches[id] = JSON.parse(JSON.stringify(target.catches[sourceId]))
+    }
     root.claim(draft, id)
     return id
   }
@@ -524,12 +550,87 @@ Panel {
     sync.gather(match, String(workspace))
   }
 
+  // Catch an app in a layout's places, without the aiming the panel does.
+  // What `catchapp` on the command line does.
+  function setCatch(layoutId, match, slots) {
+    store.mutate(function(draft) {
+      root.writeCatch(draft, layoutId, match, slots, "")
+    })
+    refreshAppState()
+    sync.sync()
+  }
+
   function assignLayout(layoutId) {
     store.mutate(function(draft) { root.claim(draft, layoutId) })
     sync.sync()
   }
 
   // ------------------------------------------------------------------- pins
+
+  // The one place a catch is written. Mirrors `writePin`, minus everything a
+  // pin knows about starting an app: a catch never launches anything, it only
+  // says which place is being kept for it.
+  function writeCatch(draft, layoutId, match, slots, name) {
+    var target = Model.findProfile(draft, draft.activeProfile)
+    if (!target) return
+    if (!target.catches) target.catches = ({})
+    if (!target.catches[layoutId]) target.catches[layoutId] = ({})
+    if (slots.length === 0) {
+      delete target.catches[layoutId][match]
+      // An empty layout entry would sit in the document being drawn and never
+      // used; `normalizeCatches` drops it on the next read anyway.
+      var left = false
+      for (var other in target.catches[layoutId]) { left = true; break }
+      if (!left) delete target.catches[layoutId]
+      return
+    }
+    var previous = target.catches[layoutId][match]
+    var rule = { slots: slots }
+    var label = name || (previous && previous.name) || ""
+    if (label !== "") rule.name = label
+    target.catches[layoutId][match] = rule
+  }
+
+  // Catching is a layout property, not a workspace one: it follows the shape,
+  // so the same app takes the same place on every workspace running it and on
+  // whatever workspace that layout is moved to next. Nothing is moved — which
+  // is the point. A terminal you want on six workspaces cannot be pinned to
+  // one of them, but every one of those workspaces can keep it a place.
+  function catchApp(match, name) {
+    var clean = Model.normalizeAppMatch(match)
+    if (clean === null) return
+    var layout = selectedLayout
+    if (!layout || Model.isBuiltin(layout.id)) return
+    var slot = selectedSlot
+    if (slot < 1) return
+    var label = Model.normalizeAppMatch(name)
+    if (label === clean) label = null
+    var sourceId = layout.id
+    store.mutate(function(draft) {
+      // A catch is an edit to the layout, so a preset forks first the same way
+      // a drag does — otherwise catching an app on "Focused" would put it on
+      // every workspace that ever picked the preset.
+      var id = root.forkPreset(draft, sourceId)
+      var rules = Model.catchEntries(draft, id)
+      var next = []
+      for (var i = 0; i < rules.length; i++) {
+        if (rules[i].match !== clean) continue
+        next = rules[i].slots.slice()
+        break
+      }
+      // Same gesture as a pin: aiming at a second tile gives the app a second
+      // place, and clicking one it already holds takes that one back.
+      var at = next.indexOf(slot)
+      if (at === -1) next.push(slot)
+      else next.splice(at, 1)
+      next.sort(function(a, b) { return a - b })
+      root.writeCatch(draft, id, clean, next, label || "")
+    })
+    appQuery = ""
+    appSearch.text = ""
+    refreshAppState()
+    sync.sync()
+  }
 
   // Pinning is a workspace property, not a layout one: it works the same on a
   // workspace running Dwindle, and it survives every layout change made after.
@@ -842,13 +943,23 @@ Panel {
       return
     }
     if (key === "clear") {
+      var layoutId = selectedLayoutId
       store.mutate(function(draft) {
         var target = Model.findProfile(draft, draft.activeProfile)
-        if (!target || !target.pins) return
-        for (var match in target.pins) {
+        if (!target) return
+        for (var match in (target.pins || {})) {
           var pin = target.pins[match]
           var index = pin.slots.indexOf(slot)
           if (index !== -1) pin.slots.splice(index, 1)
+        }
+        var rules = target.catches ? target.catches[layoutId] : null
+        for (var app in (rules || {})) {
+          var kept = []
+          var slots = rules[app].slots || []
+          for (var i = 0; i < slots.length; i++) {
+            if (slots[i] !== slot) kept.push(slots[i])
+          }
+          root.writeCatch(draft, layoutId, app, kept, "")
         }
       })
       refreshAppState()
@@ -907,6 +1018,13 @@ Panel {
       if (!layout || !target) return
       var moved = Model.movePlaceInto(layout, target.pins, workspace, from, to, edge)
       if (!moved) return
+      // The catches on this layout are place numbers too, and the drop has
+      // just moved every one of them.
+      var rules = target.catches ? target.catches[id] : null
+      if (rules) {
+        var caught = Model.movedCatches(layout, rules, from, to, edge)
+        if (caught) target.catches[id] = caught
+      }
       layout.weights = moved.weights
       layout.cells = moved.cells
       target.pins = moved.pins
@@ -937,10 +1055,13 @@ Panel {
   // when you are looking at it.
   function swapPlaces(from, to) {
     var workspace = String(selectedWorkspace)
+    var layoutId = selectedLayoutId
     store.mutate(function(draft) {
       var target = Model.findProfile(draft, draft.activeProfile)
       if (!target) return
       target.pins = Model.swappedPins(target.pins, workspace, from, to)
+      var rules = target.catches ? target.catches[layoutId] : null
+      if (rules) target.catches[layoutId] = Model.swappedCatches(rules, from, to)
     })
     if (selectedSlot === from) selectedSlot = to
     else if (selectedSlot === to) selectedSlot = from
@@ -956,13 +1077,20 @@ Panel {
     if (selectedSlot > 0) appSearch.forceActiveFocus()
   }
 
+  // Clicking an app writes whichever kind of claim the Apps row is aimed at.
+  // One function so the search field and the rows cannot drift apart.
+  function claimApp(match, name) {
+    if (catching) catchApp(match, name)
+    else pinApp(match, name)
+  }
+
   // Enter in the search field takes the first row that is not already pinned
   // here — the app you were typing towards, or the query itself.
   function acceptAppSearch() {
     var rows = appRows.rows
     for (var i = 0; i < rows.length; i++) {
       if (!rows[i].pinned) {
-        pinApp(rows[i].match, rows[i].name)
+        claimApp(rows[i].match, rows[i].name)
         return
       }
     }
@@ -1104,7 +1232,8 @@ Panel {
         name: unique,
         fallback: source ? source.fallback : "dwindle",
         assignments: source ? JSON.parse(JSON.stringify(source.assignments)) : {},
-        pins: source && source.pins ? JSON.parse(JSON.stringify(source.pins)) : {}
+        pins: source && source.pins ? JSON.parse(JSON.stringify(source.pins)) : {},
+        catches: source && source.catches ? JSON.parse(JSON.stringify(source.catches)) : {}
       })
       draft.activeProfile = unique
     })
@@ -1476,6 +1605,21 @@ Panel {
       if (match === null) return "no app given"
       root.unpinApp(match)
       return match + " released"
+    }
+
+    // Every function takes what it acts on, so this names the layout rather
+    // than reading whichever one the panel happens to be showing. No slots
+    // releases the app: a catch with no places is not a rule.
+    function catchapp(layout: string, app: string, slots: string): string {
+      var match = Model.normalizeAppMatch(app)
+      if (match === null) return "no app given"
+      var target = Model.findLayout(root.config, layout)
+      if (!target) return "no layout called " + layout
+      if (Model.isBuiltin(target.id)) return target.id + " is Hyprland's own layout"
+      var places = Model.parseSlots(slots)
+      root.setCatch(target.id, match, places)
+      if (places.length === 0) return target.name + " no longer keeps a place for " + match
+      return target.name + " keeps slot " + places.join(",") + " for " + match
     }
 
     function capture(workspace: string): string {
@@ -2019,14 +2163,72 @@ Panel {
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               textFormat: Text.PlainText
-              text: root.selectedSlot > 0
-                ? "click the slot again to stop aiming"
-                : (root.pinnedHere.length > 0
-                  ? root.pinnedHere.length + " pinned to workspace " + Model.workspaceLabel(root.selectedWorkspace)
-                  : "click a slot above, or search")
+              text: {
+                if (root.selectedSlot > 0) return "click the slot again to stop aiming"
+                var said = []
+                if (root.pinnedHere.length > 0) {
+                  said.push(root.pinnedHere.length + " pinned to workspace " +
+                    Model.workspaceLabel(root.selectedWorkspace))
+                }
+                if (root.caughtHere.length > 0 && root.selectedLayout) {
+                  said.push(root.caughtHere.length + " caught by " + root.selectedLayout.name)
+                }
+                if (said.length === 0) return "click a slot above, or search"
+                return said.join(", ")
+              }
               color: Util.alpha(root.fg, 0.55)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
+            }
+          }
+
+          // Which kind of claim a click makes. Only offered once a place is
+          // aimed at, because a catch is a place and nothing else — there is no
+          // "catch it somewhere on this workspace" — and only on a layout of
+          // our own, since a built-in never runs the code that reads it.
+          //
+          // A Row, not a Flow: the label anchors itself to the middle of the
+          // buttons beside it, and a Flow refuses to lay out anything that
+          // anchors — silently, apart from one warning at load.
+          Row {
+            width: parent.width
+            spacing: Style.spacing.sm
+            visible: root.selectedSlot > 0 && root.selectedLayout !== null
+              && !Model.isBuiltin(root.selectedLayoutId)
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: "Keep the place for it on"
+              color: Util.alpha(root.fg, 0.5)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Button {
+              foreground: root.fg
+              accent: root.accent
+              bordered: true
+              fontSize: Style.font.caption
+              verticalPadding: Style.spacing.xs
+              text: "Workspace " + Model.workspaceLabel(root.selectedWorkspace)
+              selected: !root.catching
+              tooltipText: "Move the app here and give it this place"
+              onClicked: root.pinTarget = "workspace"
+            }
+
+            Button {
+              foreground: root.fg
+              accent: root.accent
+              bordered: true
+              fontSize: Style.font.caption
+              verticalPadding: Style.spacing.xs
+              text: root.selectedLayout ? root.selectedLayout.name : ""
+              selected: root.catching
+              tooltipText: "Give it this place on every workspace running " +
+                (root.selectedLayout ? root.selectedLayout.name : "this layout") +
+                ", and move nothing"
+              onClicked: root.pinTarget = "layout"
             }
           }
 
@@ -2039,7 +2241,8 @@ Panel {
             foreground: root.fg
             accent: root.accent
             placeholderText: root.selectedSlot > 0
-              ? "Add an app to slot " + root.selectedSlot
+              ? (root.catching ? "Catch an app in slot " + root.selectedSlot
+                : "Add an app to slot " + root.selectedSlot)
               : "Search apps, or type a window class"
             onTextChanged: root.appQuery = text
             onAccepted: root.acceptAppSearch()
@@ -2079,7 +2282,7 @@ Panel {
                 MouseArea {
                   anchors.fill: parent
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.pinApp(appRow.modelData.match, appRow.modelData.name)
+                  onClicked: root.claimApp(appRow.modelData.match, appRow.modelData.name)
                 }
 
                 Text {

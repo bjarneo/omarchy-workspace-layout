@@ -166,6 +166,27 @@ back. A third window of the same app has no place left on the list and fills
 whatever is free, and a slot that does not exist yet — because fewer windows are
 open than the layout has slots — is skipped rather than held empty.
 
+**Or give the place to an app without moving it.** A pin answers *which
+workspace* an app belongs to. Sometimes the question is the other one — *which
+place* — and the app belongs on all of them: a terminal you open on every
+workspace should take the same corner every time, and pinning it to one
+workspace is precisely wrong.
+
+Aim at a slot and the Apps row asks which you meant: `Workspace 3` pins as
+before, or the layout's own name catches. A catch belongs to the *shape*, so it
+holds on every workspace running that layout and travels with it if you give
+that layout to another workspace. Nothing is ever moved — the window opens
+where it was going to open and takes the place the layout was keeping for it.
+
+In the document that is a `catches` block on the profile, keyed by layout:
+
+```json
+"catches": { "custom-3f9a": { "kitty": [2] } }
+```
+
+A pin wins where both apply, because it names the workspace and the catch only
+names the shape.
+
 **Start the workspace.** One button under the list opens everything pinned here
 that has no window yet — press it after a reboot and the workspace furnishes
 itself, each app landing in the slot you gave it. Apps already running are left
@@ -273,13 +294,15 @@ plugin is scriptable:
 ```bash
 omarchy-shell workspace-layout status
 omarchy-shell workspace-layout pin ghostty 3 "1,3"
+omarchy-shell workspace-layout catchapp custom-3f9a kitty 2
 omarchy-shell workspace-layout launch 3
 omarchy-shell workspace-layout apply focus
 ```
 
 `status`, `workspace`, `json`, `profiles`, `layouts`, `apply`, `set`, `reset`,
-`pin`, `unpin`, `capture`, `launch`, and the panel's own `toggle` / `open` /
-`close`. Every command, what it prints, and a worked example are in
+`pin`, `unpin`, `catchapp`, `capture`, `launch`, and the panel's own `toggle` /
+`open` / `close`. `catchapp` takes a layout, an app and its places; no places
+releases it. Every command, what it prints, and a worked example are in
 [docs/cli.md](docs/cli.md).
 
 ### A keybinding

@@ -1082,6 +1082,7 @@ function normalizeProfile(raw, layouts) {
     assignments: assignments,
     monitors: monitors,
     pins: pins,
+    catches: normalizeCatches(input.catches, known),
     autostart: normalizeAutostart(input.autostart)
   }
 }
@@ -1209,6 +1210,68 @@ function normalizePin(value) {
   return pin
 }
 
+// Which places a layout claims for an app, wherever that layout is running.
+//
+// A pin answers "which workspace does this app belong to"; a catch answers
+// "which place of this shape belongs to it". They are different questions —
+// an app you want on every workspace has no business being moved to one — so a
+// catch never emits a window rule, only the slot targeting. Nothing moves; the
+// window lands where it was going to and takes the place the layout kept.
+//
+// Keyed by layout id inside the profile rather than on the layout itself:
+// layouts are shared between profiles, and switching profiles is meant to
+// change which apps live where.
+//
+// `"kitty": [2]` is the whole rule and the friendliest thing to type by hand;
+// the object form is what the panel writes when it also knows a readable name.
+function normalizeCatch(value) {
+  var raw = (value && typeof value === "object" && !(value instanceof Array))
+    ? value : { slots: value }
+  var input = (raw.slots instanceof Array)
+    ? raw.slots : (raw.slots === undefined ? [] : [raw.slots])
+  var slots = []
+  var seen = {}
+  for (var i = 0; i < input.length; i++) {
+    var slot = Math.round(Number(input[i]))
+    if (!isFiniteNumber(slot) || slot < 1 || slot > MAX_SLOTS || seen[slot]) continue
+    seen[slot] = true
+    slots.push(slot)
+  }
+  // A catch with no places says nothing at all, and would otherwise sit in the
+  // document forever as an entry the panel has to draw and nothing can use.
+  if (slots.length === 0) return null
+  slots.sort(function(a, b) { return a - b })
+  var out = { slots: slots }
+  var name = normalizeAppMatch(raw.name)
+  if (name !== null) out.name = name.slice(0, 60)
+  return out
+}
+
+function normalizeCatches(raw, known) {
+  var out = {}
+  var input = (raw && typeof raw === "object") ? raw : {}
+  for (var id in input) {
+    var layout = slugify(id)
+    // A catch on a layout that was deleted, or on a built-in, has nothing to
+    // attach to: built-ins are Hyprland's own tiling and never run our
+    // `recalculate`, so a place number means nothing there.
+    if (!known[layout]) continue
+    var rules = (input[id] && typeof input[id] === "object") ? input[id] : {}
+    var kept = {}
+    var any = false
+    for (var app in rules) {
+      var match = normalizeAppMatch(app)
+      if (match === null) continue
+      var rule = normalizeCatch(rules[app])
+      if (rule === null) continue
+      kept[match] = rule
+      any = true
+    }
+    if (any) out[layout] = kept
+  }
+  return out
+}
+
 // Hyprland matches window rules by regex, and a bare class would match every
 // class containing it — `foot` would claim `footclient` too. Anchor it, the
 // same way the wiki writes matchers by hand. A match that already opens with
@@ -1271,7 +1334,12 @@ function activeProfile(config) {
 function layoutIdForWorkspace(config, workspaceId, monitorName) {
   var profile = activeProfile(config)
   var key = normalizeWorkspaceKey(workspaceId)
-  if (key !== null && profile.assignments[key]) return profile.assignments[key]
+  // Guarded the same way `monitors` is below: `activeProfile` hands back
+  // whatever is in the document, and `placeTree` builds one by hand with only
+  // the fields it needs.
+  if (key !== null && profile.assignments && profile.assignments[key]) {
+    return profile.assignments[key]
+  }
   var monitor = normalizeMonitorName(monitorName)
   if (monitor !== null && profile.monitors && profile.monitors[monitor]) {
     return profile.monitors[monitor]
@@ -1375,16 +1443,65 @@ function pinnedWorkspace(config, match) {
 // The apps pinned to each numbered slot of a workspace, indexed from zero, so
 // the canvas can write their names inside the tile they claim. A pin with no
 // slot is not here — it belongs to the workspace, not to a place in it.
-function slotApps(config, workspaceId) {
-  var entries = pinsForWorkspace(config, workspaceId)
+function slotApps(config, workspaceId, monitorName) {
   var out = []
-  for (var i = 0; i < entries.length; i++) {
-    var slots = entries[i].slots
-    for (var j = 0; j < slots.length; j++) {
-      var slot = slots[j]
+  var i, j, slots, slot
+  // Catches first, so an app named by both reads in the order the generated
+  // Lua applies them: the layout keeps a place for it, and a pin on this
+  // workspace overrides where that is.
+  var caught = catchesForWorkspace(config, workspaceId, monitorName)
+  for (i = 0; i < caught.length; i++) {
+    slots = caught[i].slots
+    for (j = 0; j < slots.length; j++) {
+      slot = slots[j]
       while (out.length < slot) out.push([])
-      out[slot - 1].push(entries[i].match)
+      if (out[slot - 1].indexOf(caught[i].match) === -1) out[slot - 1].push(caught[i].match)
     }
+  }
+  var entries = pinsForWorkspace(config, workspaceId)
+  for (i = 0; i < entries.length; i++) {
+    slots = entries[i].slots
+    for (j = 0; j < slots.length; j++) {
+      slot = slots[j]
+      while (out.length < slot) out.push([])
+      if (out[slot - 1].indexOf(entries[i].match) === -1) out[slot - 1].push(entries[i].match)
+    }
+  }
+  return out
+}
+
+// The catch rules a layout carries, as a sorted list, so the generated file is
+// stable across edits that only reorder the JSON.
+function catchEntries(config, layoutId) {
+  var profile = activeProfile(config)
+  var all = (profile && profile.catches && typeof profile.catches === "object")
+    ? profile.catches : {}
+  var rules = all[slugify(String(layoutId === undefined ? "" : layoutId))]
+  if (!rules) return []
+  var out = []
+  for (var match in rules) {
+    out.push({ match: match, slots: rules[match].slots, name: rules[match].name || "" })
+  }
+  out.sort(function(a, b) { return a.match < b.match ? -1 : (a.match > b.match ? 1 : 0) })
+  return out
+}
+
+// The same, resolved through whatever layout the workspace is running right
+// now — which is the whole point of a catch: it follows the shape, so moving a
+// layout to another workspace takes its apps' places with it.
+function catchesForWorkspace(config, workspaceId, monitorName) {
+  return catchEntries(config, layoutIdForWorkspace(config, workspaceId, monitorName))
+}
+
+// Every app the active profile catches anywhere, for the panel's name lookup.
+function catchedApps(config) {
+  var profile = activeProfile(config)
+  var all = (profile && profile.catches && typeof profile.catches === "object")
+    ? profile.catches : {}
+  var out = []
+  for (var id in all) {
+    var entries = catchEntries(config, id)
+    for (var i = 0; i < entries.length; i++) out.push(entries[i])
   }
   return out
 }
@@ -2039,6 +2156,57 @@ function movePlaceInto(layout, pins, workspaceId, fromPlace, toPlace, edge) {
   return placeTreeToShape(spec, slots, pins, workspaceId)
 }
 
+// A catch is a place number too, so a drop or a swap renumbers it exactly the
+// way it renumbers a pin — and getting that wrong is the bug AGENTS.md warns
+// about: remove one place and every other number moves under you.
+//
+// Rather than teach the tree about two kinds of app claim, the catches are
+// handed to the same functions dressed as pins on the workspace being edited.
+// The shape those produce is identical either way — it is built from weights
+// and parts, never from what is sitting in them — so only the numbering is
+// read back.
+var CATCH_WORKSPACE = "1"
+
+function catchesAsPins(rules) {
+  var out = {}
+  var input = (rules && typeof rules === "object") ? rules : {}
+  for (var match in input) {
+    var rule = normalizeCatch(input[match])
+    if (rule === null) continue
+    out[match] = { workspace: CATCH_WORKSPACE, slots: rule.slots }
+  }
+  return out
+}
+
+// Back the other way, keeping the readable name the catch was carrying: the
+// round trip through a pin has nowhere to put it.
+function pinsAsCatches(pins, before) {
+  var out = {}
+  var input = (pins && typeof pins === "object") ? pins : {}
+  var previous = (before && typeof before === "object") ? before : {}
+  for (var match in input) {
+    var rule = normalizeCatch({ slots: input[match].slots })
+    if (rule === null) continue
+    var older = normalizeCatch(previous[match])
+    if (older && older.name) rule.name = older.name
+    out[match] = rule
+  }
+  return out
+}
+
+// The catches of the layout a drop is reshaping, renumbered onto the new shape.
+function movedCatches(layout, rules, fromPlace, toPlace, edge) {
+  var moved = movePlaceInto(layout, catchesAsPins(rules), CATCH_WORKSPACE,
+    fromPlace, toPlace, edge)
+  if (!moved) return null
+  return pinsAsCatches(moved.pins, rules)
+}
+
+// The same for a swap, which only exchanges two numbers.
+function swappedCatches(rules, a, b) {
+  return pinsAsCatches(swappedPins(catchesAsPins(rules), CATCH_WORKSPACE, a, b), rules)
+}
+
 // ------------------------------------------------------------------ capture
 
 // Group windows that share a band of the main axis: the columns of a columns
@@ -2639,6 +2807,19 @@ function generateLua(config, liveWorkspaceIds, workspaceMonitors) {
     var id = layoutIdForWorkspace(normalized, workspaces[i], screens[workspaces[i]])
     lines.push("W.set_workspace(" + luaString(workspaces[i]) + ", " +
       luaString(luaLayoutRef(id)) + ")")
+    // The layout's own catch rules, expanded onto every workspace running it.
+    // Slot targeting and nothing else: a catch says which place an app takes
+    // when it opens here, never that it should open here.
+    var caught = catchEntries(normalized, id)
+    for (var c = 0; c < caught.length; c++) {
+      var claimed = slotKeys(caught[c].match)
+      var places = []
+      for (var q = 0; q < caught[c].slots.length; q++) places.push(luaNumber(caught[c].slots[q]))
+      for (var k = 0; k < claimed.length; k++) {
+        lines.push("W.set_slot(" + luaString(workspaces[i]) + ", " +
+          luaString(claimed[k]) + ", { " + places.join(", ") + " })")
+      }
+    }
   }
   lines.push("")
 
@@ -2744,6 +2925,16 @@ function statusLine(config, workspaceId, monitorName) {
     }
     parts.push("apps " + apps.join(" "))
   }
+  // Said separately from the pins because it is a different claim: these apps
+  // are not sent here, the shape simply keeps them a place when they arrive.
+  var caught = catchesForWorkspace(config, key, monitorName)
+  if (caught.length > 0) {
+    var kept = []
+    for (var c = 0; c < caught.length; c++) {
+      kept.push((caught[c].name || caught[c].match) + "@" + caught[c].slots.join(","))
+    }
+    parts.push("caught " + kept.join(" "))
+  }
   if (isAutostart(config, key)) parts.push("opens at login")
   return parts.join(" · ")
 }
@@ -2783,7 +2974,8 @@ function stateJson(config, workspaceMonitors, liveWorkspaceIds) {
       orientation: each.orientation,
       weights: each.weights,
       cells: each.cells,
-      places: totalCells(each.cells)
+      places: totalCells(each.cells),
+      catches: catchEntries(normalized, each.id)
     })
   }
 
@@ -2939,6 +3131,13 @@ if (typeof module !== "undefined") {
     captureLayout: captureLayout,
     appPattern: appPattern,
     pinEntries: pinEntries,
+    normalizeCatch: normalizeCatch,
+    normalizeCatches: normalizeCatches,
+    catchEntries: catchEntries,
+    catchesForWorkspace: catchesForWorkspace,
+    catchedApps: catchedApps,
+    movedCatches: movedCatches,
+    swappedCatches: swappedCatches,
     pinsForWorkspace: pinsForWorkspace,
     pinnedWorkspace: pinnedWorkspace,
     searchApps: searchApps,

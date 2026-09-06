@@ -76,7 +76,8 @@ omarchy-shell workspace-layout json | jq '.workspaces[] | select(.builtin == fal
   ],
   "layouts": [
     { "id": "even", "name": "Even", "kind": "ratio", "orientation": "columns",
-      "weights": [50, 50], "cells": [[100], [50, 50]], "places": 3 }
+      "weights": [50, 50], "cells": [[100], [50, 50]], "places": 3,
+      "catches": [{ "match": "kitty", "slots": [2], "name": "Kitty" }] }
   ],
   "pins": [
     { "match": "foot", "workspace": "9", "slots": [1, 2, 3], "name": "Foot" }
@@ -155,6 +156,28 @@ made; after that they are yours to move.
 $ omarchy-shell workspace-layout unpin ghostty
 ghostty released
 ```
+
+### `catchapp <layout> <app> <slots>`
+
+Keep a place for an app in a *layout*, on every workspace running it. Unlike a
+pin, nothing is moved: the window opens where it was going to open, and takes
+the place the shape was holding. That is the difference — a pin answers which
+workspace an app belongs to, a catch answers which place.
+
+Because it belongs to the layout, it travels: give that layout to another
+workspace and the app's place comes with it.
+
+```
+$ omarchy-shell workspace-layout catchapp custom-3f9a kitty 2
+Custom keeps slot 2 for kitty
+
+$ omarchy-shell workspace-layout catchapp custom-3f9a kitty ""
+Custom no longer keeps a place for kitty
+```
+
+A pin wins where both apply, since it names the workspace and the catch only
+names the shape. Hyprland's own layouts cannot catch anything — a place number
+means nothing to `dwindle`.
 
 ### `capture <workspace>`
 
