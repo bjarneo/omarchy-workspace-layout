@@ -1279,6 +1279,58 @@ function layoutIdForWorkspace(config, workspaceId, monitorName) {
   return profile.fallback
 }
 
+// Omarchy's SUPER+L writes one Lua workspace rule per workspace under
+// ~/.local/state/omarchy/workspace-layouts. The plugin's own document is a
+// separate source of truth, so those files have to be read back in or Super+L
+// and this panel disagree the moment the key is pressed.
+function parseOmarchyToggleLua(text) {
+  var matches = parseOmarchyToggleFiles(text)
+  return matches.length > 0 ? matches[0] : null
+}
+
+function parseOmarchyToggleFiles(text) {
+  var source = String(text || "")
+  var re = /workspace\s*=\s*"(\d+)"\s*,\s*layout\s*=\s*"([^"]+)"/g
+  var out = []
+  var match
+  while ((match = re.exec(source)) !== null) {
+    var workspace = normalizeWorkspaceId(match[1])
+    var layout = String(match[2] || "")
+    if (workspace === null || !isBuiltin(layout)) continue
+    out.push({ workspace: workspace, layout: layout })
+  }
+  return out
+}
+
+// Write Super+L's choice into the active profile. Returns a new document when
+// something actually changed, or null when the plugin already agrees — callers
+// persist only on a real change, so a file watcher cannot loop.
+//
+// `onlyBuiltins` is the startup scan: a leftover Super+L file must not steal a
+// workspace the user later gave to one of this plugin's layouts. A live write
+// (the key just pressed) is an explicit choice and always wins.
+function followOmarchyToggles(config, assignments, opts) {
+  var options = opts || {}
+  var normalized = normalizeConfig(config)
+  var list = assignments instanceof Array ? assignments : []
+  var draft = null
+  var profile = null
+  for (var i = 0; i < list.length; i++) {
+    var workspace = normalizeWorkspaceId(list[i] && list[i].workspace)
+    var layout = String((list[i] && list[i].layout) || "")
+    if (workspace === null || !isBuiltin(layout)) continue
+    var current = layoutIdForWorkspace(draft || normalized, workspace)
+    if (current === layout) continue
+    if (options.onlyBuiltins && !isBuiltin(current)) continue
+    if (!draft) {
+      draft = JSON.parse(JSON.stringify(normalized))
+      profile = activeProfile(draft)
+    }
+    profile.assignments[workspace] = layout
+  }
+  return draft
+}
+
 // The pins in the active profile, as a sorted list, so the generated file is
 // stable across edits that only reorder the JSON.
 function pinEntries(config) {
@@ -2874,6 +2926,9 @@ if (typeof module !== "undefined") {
     findProfile: findProfile,
     activeProfile: activeProfile,
     layoutIdForWorkspace: layoutIdForWorkspace,
+    parseOmarchyToggleLua: parseOmarchyToggleLua,
+    parseOmarchyToggleFiles: parseOmarchyToggleFiles,
+    followOmarchyToggles: followOmarchyToggles,
     normalizeAppMatch: normalizeAppMatch,
     normalizePin: normalizePin,
     slotKeys: slotKeys,

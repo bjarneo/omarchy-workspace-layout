@@ -46,6 +46,12 @@ Item {
     onRevisionChanged: syncTimer.restart()
   }
 
+  OmarchyToggleFollow {
+    config: store.config
+    active: store.ready
+    onFollowed: function(document) { store.save(document) }
+  }
+
   HyprlandSync {
     id: sync
     config: store.config
