@@ -1034,7 +1034,7 @@ function normalizeProfile(raw, layouts) {
   var rawAssignments = (input.assignments && typeof input.assignments === "object")
     ? input.assignments : {}
   for (var key in rawAssignments) {
-    var workspace = normalizeWorkspaceId(key)
+    var workspace = normalizeWorkspaceKey(key)
     if (workspace === null) continue
     var value = String(rawAssignments[key])
     // A layout that was deleted out from under a profile silently reverts to
@@ -1096,11 +1096,56 @@ function normalizeMonitorName(value) {
   return text.slice(0, 64)
 }
 
-// Hyprland workspace ids are integers; named and special workspaces are out of
-// scope because a workspace rule keyed by name would not survive a rename.
+function normalizeWorkspaceKey(value) {
+  var object = value && typeof value === "object" ? value : null
+  if (object) {
+    if (object.special === true) return null
+    var objectName = String(object.name === undefined || object.name === null ? "" : object.name)
+    if (/[\u0000-\u001f\u007f]/.test(objectName)) return null
+    objectName = objectName.trim()
+    var objectId = Number(object.id)
+    // Hyprland gives named workspaces negative ids. A positive id is the
+    // canonical selector even when the object also exposes a numeric name.
+    if (objectName.length > 0 && isFiniteNumber(objectId) && objectId < 0) {
+      value = "name:" + objectName
+    } else if (isFiniteNumber(objectId)) {
+      value = object.id
+    } else if (objectName.length > 0) {
+      value = "name:" + objectName
+    } else {
+      return null
+    }
+  }
+
+  if (typeof value === "number") {
+    if (!isFiniteNumber(value) || Math.round(value) !== value) return null
+    return normalizeWorkspaceId(value)
+  }
+
+  var text = String(value === undefined || value === null ? "" : value)
+  if (/[\u0000-\u001f\u007f]/.test(text)) return null
+  text = text.trim()
+  var named = text.indexOf("name:") === 0
+  if (named) text = text.slice(5).trim()
+  if (text.length === 0 || text === "special" || /^special:/.test(text)) return null
+  if (named) return "name:" + text
+  if (/^[+-]?[0-9]+$/.test(text)) return normalizeWorkspaceId(text)
+  return "name:" + text
+}
+
+function workspaceKey(value) {
+  return normalizeWorkspaceKey(value)
+}
+
+function workspaceLabel(value) {
+  var key = normalizeWorkspaceKey(value)
+  return key && key.indexOf("name:") === 0 ? key.slice(5) : key
+}
+
 function normalizeWorkspaceId(value) {
   var n = Number(value)
   if (!isFiniteNumber(n)) return null
+  if (Math.round(n) !== n) return null
   n = Math.round(n)
   if (n < 1 || n > 99) return null
   return String(n)
@@ -1131,7 +1176,7 @@ function normalizeAppMatch(value) {
 // what this plugin's own config said before slots could be plural.
 function normalizePin(value) {
   var raw = (value && typeof value === "object") ? value : { workspace: value }
-  var workspace = normalizeWorkspaceId(raw.workspace)
+  var workspace = normalizeWorkspaceKey(raw.workspace)
   if (workspace === null) return null
 
   var name = normalizeAppMatch(raw.name)
@@ -1225,7 +1270,7 @@ function activeProfile(config) {
 // profile's fallback.
 function layoutIdForWorkspace(config, workspaceId, monitorName) {
   var profile = activeProfile(config)
-  var key = normalizeWorkspaceId(workspaceId)
+  var key = normalizeWorkspaceKey(workspaceId)
   if (key !== null && profile.assignments[key]) return profile.assignments[key]
   var monitor = normalizeMonitorName(monitorName)
   if (monitor !== null && profile.monitors && profile.monitors[monitor]) {
@@ -1255,7 +1300,7 @@ function pinEntries(config) {
 
 // What the panel lists under one workspace.
 function pinsForWorkspace(config, workspaceId) {
-  var key = normalizeWorkspaceId(workspaceId)
+  var key = normalizeWorkspaceKey(workspaceId)
   if (key === null) return []
   var entries = pinEntries(config)
   var out = []
@@ -1324,7 +1369,7 @@ function normalizeCatalogEntry(value) {
 // what takes a hand-written matcher, so the search field is also the class
 // field.
 function searchApps(config, workspaceId, catalog, query, limit) {
-  var key = normalizeWorkspaceId(workspaceId)
+  var key = normalizeWorkspaceKey(workspaceId)
   var typed = normalizeAppMatch(query)
   var needle = typed === null ? "" : typed.toLowerCase()
   var cap = (limit === undefined || limit === null) ? 6 : limit
@@ -1498,12 +1543,19 @@ function normalizeAutostart(value) {
   var seen = {}
   var out = []
   for (var i = 0; i < raw.length; i++) {
-    var id = normalizeWorkspaceId(raw[i])
+    var id = normalizeWorkspaceKey(raw[i])
     if (id === null || seen[id]) continue
     seen[id] = true
     out.push(id)
   }
-  out.sort(function(a, b) { return Number(a) - Number(b) })
+  out.sort(function(a, b) {
+    var an = normalizeWorkspaceId(a)
+    var bn = normalizeWorkspaceId(b)
+    if (an !== null && bn !== null) return Number(an) - Number(bn)
+    if (an !== null) return -1
+    if (bn !== null) return 1
+    return a.localeCompare(b)
+  })
   return out
 }
 
@@ -1514,7 +1566,7 @@ function autostartWorkspaces(config) {
 }
 
 function isAutostart(config, workspaceId) {
-  var key = normalizeWorkspaceId(workspaceId)
+  var key = normalizeWorkspaceKey(workspaceId)
   if (key === null) return false
   return autostartWorkspaces(config).indexOf(key) !== -1
 }
@@ -1523,7 +1575,7 @@ function isAutostart(config, workspaceId) {
 // for it, and the workspace it names is either in the list or not.
 function toggledAutostart(list, workspaceId) {
   var out = normalizeAutostart(list)
-  var key = normalizeWorkspaceId(workspaceId)
+  var key = normalizeWorkspaceKey(workspaceId)
   if (key === null) return out
   var at = out.indexOf(key)
   if (at === -1) out.push(key)
@@ -1536,7 +1588,7 @@ function toggledAutostart(list, workspaceId) {
 // behind would come back to life the next time something was pinned there.
 function withoutAutostart(list, workspaceId) {
   var out = normalizeAutostart(list)
-  var key = normalizeWorkspaceId(workspaceId)
+  var key = normalizeWorkspaceKey(workspaceId)
   if (key === null) return out
   var at = out.indexOf(key)
   if (at !== -1) out.splice(at, 1)
@@ -1591,9 +1643,9 @@ function terminalClassFor(match, workspaceId) {
   // The workspace is part of the name so the same program pinned to two
   // workspaces gets two classes. Sharing one, the second pin could never be
   // told from the first, and the rule would send both windows to one place.
-  var where = normalizeWorkspaceId(workspaceId)
+  var where = workspaceClassToken(workspaceId)
   // `ws` first because a GTK app id element may not start with a digit.
-  return "omarchy.wsl." + slug + (where === null ? "" : ".ws" + where)
+  return "omarchy.wsl." + slug + (where === "" ? "" : ".ws" + where)
 }
 
 function terminalSpec(id) {
@@ -1627,6 +1679,23 @@ function terminalLaunch(terminal, appClass, command) {
 function launchToken(text) {
   var out = String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, "")
   return out.slice(0, 24)
+}
+
+// Workspace names may contain punctuation that slugify would collapse. Encode
+// named selectors for terminal classes so distinct workspaces never share the
+// class used to learn a pin back from its newly opened window.
+function workspaceClassToken(workspaceId) {
+  var key = normalizeWorkspaceKey(workspaceId)
+  if (key === null) return ""
+  var numeric = normalizeWorkspaceId(key)
+  if (numeric !== null) return numeric
+  var out = "w"
+  for (var i = 0; i < key.length; i++) {
+    var hex = key.charCodeAt(i).toString(16)
+    while (hex.length < 4) hex = "0" + hex
+    out += hex
+  }
+  return out
 }
 
 // Pair the windows that just appeared with the launches we are waiting on.
@@ -1679,7 +1748,7 @@ function matchLaunchedWindows(pending, fresh) {
 // Hyprland's own exec takes the workspace as a rule, and `silent` keeps the
 // launch from dragging the user's view to it.
 function launchAppLua(command, workspaceId) {
-  var target = normalizeWorkspaceId(workspaceId)
+  var target = normalizeWorkspaceKey(workspaceId)
   var cmd = String(command || "").replace(/[\u0000-\u001f\u007f]/g, "").trim()
   if (target === null || cmd.length === 0) return ""
   return "hl.exec_cmd(" + luaString(cmd) + ", { workspace = " +
@@ -1699,7 +1768,7 @@ function uniqueProfileName(config, base) {
 // tile with the browser in it, drop it on the tile with the terminal, and the
 // two exchange.
 function swappedPins(pins, workspaceId, a, b) {
-  var key = normalizeWorkspaceId(workspaceId)
+  var key = normalizeWorkspaceKey(workspaceId)
   var from = Math.round(Number(a))
   var to = Math.round(Number(b))
   var out = {}
@@ -1823,7 +1892,7 @@ function placeTreeToShape(layout, slots, pins, workspaceId) {
     }
   }
 
-  var key = normalizeWorkspaceId(workspaceId)
+  var key = normalizeWorkspaceKey(workspaceId)
   var out = {}
   var input = (pins && typeof pins === "object") ? pins : {}
   for (var match in input) {
@@ -2094,6 +2163,22 @@ var LUA_RUNTIME = [
   '-- slot 1 of every other workspace it happens to open on.',
   'W.slots = {}',
   '',
+  '-- Named workspaces have negative ids in Hyprland. Convert the live object',
+  '-- back to the same selector key used by generated W.set_slot calls.',
+  'local function workspace_key(workspace)',
+  '  if not workspace then return nil end',
+  '  local ok_special, special = pcall(function() return workspace.special end)',
+  '  if ok_special and special then return nil end',
+  '  local ok_id, id = pcall(function() return workspace.id end)',
+  '  local ok_name, name = pcall(function() return workspace.name end)',
+  '  if ok_id and id and tonumber(id) and tonumber(id) < 0 and ok_name and name and name ~= "" then',
+  '    return "name:" .. tostring(name)',
+  '  end',
+  '  if ok_id and id then return tostring(id) end',
+  '  if ok_name and name and name ~= "" then return "name:" .. tostring(name) end',
+  '  return nil',
+  'end',
+  '',
   'local function normalize(weights)',
   '  local total = 0',
   '  for i = 1, #weights do total = total + weights[i] end',
@@ -2289,9 +2374,10 @@ var LUA_RUNTIME = [
   '    local wants = nil',
   '    if win then',
   '      local ok, class = pcall(function() return win.class end)',
-  '      local fine, ws = pcall(function() return win.workspace and win.workspace.id end)',
-  '      if ok and class and fine and ws then',
-  '        local here = W.slots[tostring(ws)]',
+  '      local fine, workspace = pcall(function() return win.workspace end)',
+  '      local ws = fine and workspace_key(workspace) or nil',
+  '      if ok and class and ws then',
+  '        local here = W.slots[ws]',
   '        if here then wants = here[class] end',
   '      end',
   '    end',
@@ -2357,12 +2443,10 @@ var LUA_RUNTIME = [
   '  })',
   'end',
   '',
-  '-- Workspace rules accumulate: adding a second rule for a workspace does not',
-  '-- retire the first. Keep the handle so the previous rule can be disabled,',
-  '-- otherwise switching profiles would pile up dead rules that still win.',
+  '-- Workspace rules are keyed by selector. Reissuing the same selector updates',
+  '-- the existing rule in place, preserving fields such as monitor, persistent,',
+  '-- and enabled.',
   'function W.set_workspace(ws, layout)',
-  '  local previous = W.rules[ws]',
-  '  if previous then pcall(function() previous:set_enabled(false) end) end',
   '  W.rules[ws] = hl.workspace_rule({ workspace = ws, layout = layout })',
   'end',
   '',
@@ -2444,15 +2528,26 @@ function managedWorkspaceIds(config, liveWorkspaceIds) {
   var key
   for (key in profile.assignments) ids[key] = true
   var live = (liveWorkspaceIds instanceof Array) ? liveWorkspaceIds : []
+  var hasNamedWorkspace = false
   for (var i = 0; i < live.length; i++) {
-    var normalized = normalizeWorkspaceId(live[i])
+    var normalized = normalizeWorkspaceKey(live[i])
     if (normalized !== null) ids[normalized] = true
+    if (normalized && normalized.indexOf("name:") === 0) hasNamedWorkspace = true
   }
-  for (var w = 1; w <= 10; w++) ids[String(w)] = true
+  if (!hasNamedWorkspace) {
+    for (var w = 1; w <= 10; w++) ids[String(w)] = true
+  }
 
   var out = []
   for (key in ids) out.push(key)
-  out.sort(function(a, b) { return Number(a) - Number(b) })
+  out.sort(function(a, b) {
+    var an = normalizeWorkspaceId(a)
+    var bn = normalizeWorkspaceId(b)
+    if (an !== null && bn !== null) return Number(an) - Number(bn)
+    if (an !== null) return -1
+    if (bn !== null) return 1
+    return a.localeCompare(b)
+  })
   return out
 }
 
@@ -2544,7 +2639,7 @@ function livePreviewLua(layout) {
 // Self-contained rather than a W.* function: it has to work on a session whose
 // generated file predates this feature, before the new runtime has been eval'd.
 function gatherAppLua(match, workspaceId) {
-  var target = normalizeWorkspaceId(workspaceId)
+  var target = normalizeWorkspaceKey(workspaceId)
   var clean = normalizeAppMatch(match)
   if (target === null || clean === null) return ""
   var classes = slotKeys(clean)
@@ -2559,7 +2654,7 @@ function gatherAppLua(match, workspaceId) {
     // follow = false is the silent move: the windows come to the workspace,
     // the view stays where the user is.
     "      pcall(function() hl.dispatch(hl.dsp.window.move(" +
-      "{ workspace = " + Number(target) + ", window = windows[i], follow = false })) end)",
+    "{ workspace = " + luaString(target) + ", window = windows[i], follow = false })) end)",
     "    end",
     "  end",
     "end"
@@ -2572,7 +2667,7 @@ function gatherAppLua(match, workspaceId) {
 // terminal: what it is tiling with, which profile decided that, and what is
 // pinned there.
 function statusLine(config, workspaceId, monitorName) {
-  var key = normalizeWorkspaceId(workspaceId)
+  var key = normalizeWorkspaceKey(workspaceId)
   if (key === null) return "workspace " + workspaceId + " is out of range"
   var profile = activeProfile(config)
   var id = layoutIdForWorkspace(config, key, monitorName)
@@ -2583,7 +2678,7 @@ function statusLine(config, workspaceId, monitorName) {
   if (profile.assignments[key]) source = "workspace"
   else if (monitor !== null && profile.monitors[monitor]) source = "monitor " + monitor
 
-  var parts = ["workspace " + key]
+  var parts = ["workspace " + workspaceLabel(key)]
   parts.push(layout ? layout.name + " (" + describeLayout(layout) + ")" : "Hyprland " + id)
   parts.push("from " + source)
   parts.push("profile " + profile.name)
@@ -2616,7 +2711,7 @@ function stateJson(config, workspaceMonitors, liveWorkspaceIds) {
     var id = layoutIdForWorkspace(normalized, ids[i], screens[ids[i]])
     var layout = findLayout(normalized, id)
     workspaces.push({
-      workspace: Number(ids[i]),
+      workspace: normalizeWorkspaceId(ids[i]) === null ? ids[i] : Number(ids[i]),
       monitor: screens[ids[i]] || "",
       layout: id,
       name: layout ? layout.name : id,
@@ -2690,8 +2785,10 @@ function hyprctlEvalArgs(lua) {
 // Hyprland has no "focus this workspace" IPC that Quickshell exposes directly,
 // so the bar's `run` shell is the shortest honest path.
 function focusWorkspaceCommand(workspaceId) {
+  var key = normalizeWorkspaceKey(workspaceId)
+  if (key === null) return ""
   return "hyprctl dispatch " +
-    shellQuote('hl.dsp.focus({ workspace = "' + String(workspaceId) + '" })')
+    shellQuote("hl.dsp.focus({ workspace = " + luaString(key) + " })")
 }
 
 // ------------------------------------------------------------------ loader
@@ -2770,6 +2867,9 @@ if (typeof module !== "undefined") {
     normalizeProfile: normalizeProfile,
     normalizeWorkspaceId: normalizeWorkspaceId,
     normalizeMonitorName: normalizeMonitorName,
+    normalizeWorkspaceKey: normalizeWorkspaceKey,
+    workspaceKey: normalizeWorkspaceKey,
+    workspaceLabel: workspaceLabel,
     findLayout: findLayout,
     findProfile: findProfile,
     activeProfile: activeProfile,

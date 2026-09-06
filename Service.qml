@@ -22,7 +22,8 @@ Item {
     var ids = []
     var values = Hyprland.workspaces ? Hyprland.workspaces.values : []
     for (var i = 0; i < values.length; i++) {
-      if (values[i].id > 0) ids.push(values[i].id)
+      var key = Model.workspaceKey(values[i])
+      if (key !== null) ids.push(key)
     }
     return ids
   }
@@ -34,7 +35,8 @@ Item {
     var values = Hyprland.workspaces ? Hyprland.workspaces.values : []
     for (var i = 0; i < values.length; i++) {
       var monitor = values[i].monitor
-      if (values[i].id > 0 && monitor) out[String(values[i].id)] = String(monitor.name || "")
+      var key = Model.workspaceKey(values[i])
+      if (key !== null && monitor) out[key] = String(monitor.name || "")
     }
     return out
   }

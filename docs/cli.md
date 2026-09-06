@@ -16,6 +16,14 @@ been opened.
 runs, so `pin` always takes three; pass `""` when an app should land anywhere
 rather than in a particular place.
 
+Workspace arguments accept a number such as `9` or a named selector such as
+`name:code`. Quote selectors that contain spaces. Special workspaces are excluded.
+
+```bash
+omarchy-shell workspace-layout workspace name:code
+omarchy-shell workspace-layout set name:code golden
+```
+
 ## Reading
 
 ### `status`
@@ -48,6 +56,9 @@ workspace 9 · Even (50 / 50×2) · from workspace · profile default · apps Fo
 The whole picture, including how each workspace resolves right now — which the
 config file cannot tell you, because it depends on which monitor a workspace is
 on at the time.
+
+The `workspace` field remains a number for numeric workspaces. Named workspaces
+use a `name:<workspace>` string.
 
 ```bash
 omarchy-shell workspace-layout json | jq '.workspaces[] | select(.builtin == false)'

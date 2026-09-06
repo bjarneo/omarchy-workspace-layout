@@ -348,9 +348,8 @@ checks the file exists first, so leaving it does no harm. Workspaces return to
   interface has no resize hook, so `SUPER` + right-drag does nothing inside these
   layouts. Drag the panel's dividers, or use `[` and `]`. Ratios set that way are
   named and saved, which the mouse gesture never was.
-- **Integer workspaces only.** Named and special workspaces (`special:scratchpad`)
-  are left alone, because a rule keyed by name would not survive a rename. The
-  same goes for an app pin's destination.
+- **Named workspaces are supported.** They use stable `name:<workspace>` keys.
+  Special workspaces (`special:scratchpad`) remain untouched.
 - **Opening at login needs the bar widget.** The launcher lives in the panel,
   which is loaded whether or not the panel is open — the same reason the
   command line lives there. A bar-less install running only `Service.qml` keeps
