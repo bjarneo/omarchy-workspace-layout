@@ -2585,6 +2585,20 @@ test("swapping two workspaces asks Hyprland first and the document second", () =
   // refused swap leaves the file as it was.
   assert.match(qml,
     /function onSwapped\(from, to\)[\s\S]{0,200}?Model\.swappedWorkspaces\(root\.config, from, to\)/)
+  // The highlighted workspace follows its workspace to the new number.
+  assert.match(qml, /if \(selectedWorkspace === from\) selectedWorkspace = to/)
   assert.match(qml, /function swap\(a: string, b: string\): string/)
   assert.match(qml, /if \(!root\.swapWorkspaces\(from, to\)\) return "a swap is already underway"/)
+})
+
+test("a workspace's menu offers a swap with each other numbered workspace in the strip", () => {
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  assert.match(qml, /function swapTargets\(workspace\)/)
+  // The strip's numbered workspaces, empty ones included, never the one the
+  // menu is on, and nothing while a swap is already underway.
+  assert.match(qml, /if \(self === null \|\| sync\.swapping\) return \[\]/)
+  assert.match(qml, /return workspaceRow\.filter\(/)
+  assert.match(qml, /out\.push\(\{ key: "swap:" \+ targets\[t\], label: "Swap with workspace " \+ targets\[t\] \}\)/)
+  // The menu and the command line go through the same entry point.
+  assert.match(qml, /else if \(key\.indexOf\("swap:"\) === 0\) swapWorkspaces\(workspace, key\.slice\(5\)\)/)
 })

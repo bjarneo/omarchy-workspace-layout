@@ -133,6 +133,10 @@ Panel {
       out.push({ key: "capture", label: "Capture the windows here" })
       var entries = Model.pinsForWorkspace(config, menuWorkspace)
       if (entries.length > 0) out.push({ key: "clearapps", label: "Clear this workspace's apps" })
+      var targets = swapTargets(menuWorkspace)
+      for (var t = 0; t < targets.length; t++) {
+        out.push({ key: "swap:" + targets[t], label: "Swap with workspace " + targets[t] })
+      }
       return out
     }
     if (menuSlot < 1) return out
@@ -531,6 +535,10 @@ Panel {
     function onSwapped(from, to) {
       var next = Model.swappedWorkspaces(root.config, from, to)
       if (next) store.save(next)
+      // The selection stays with the workspace it was on, which now has the
+      // other number. With the panel open it would not follow focus by itself.
+      if (selectedWorkspace === from) selectedWorkspace = to
+      else if (selectedWorkspace === to) selectedWorkspace = from
       // Omarchy's Super+L files are keyed by number too, and would put the
       // old layouts back on the next press. The next press recreates them.
       toggles.forget([from, to])
@@ -898,6 +906,18 @@ Panel {
     if (key === "handback") resetWorkspace(workspace)
     else if (key === "capture") captureWorkspace(workspace)
     else if (key === "clearapps") clearWorkspaceApps(workspace)
+    else if (key.indexOf("swap:") === 0) swapWorkspaces(workspace, key.slice(5))
+  }
+
+  // The workspaces this one could trade numbers with from the menu: every
+  // numbered workspace in the strip, empty ones included, in the strip's
+  // order. Nothing is offered while a swap is underway.
+  function swapTargets(workspace) {
+    var self = Model.normalizeWorkspaceId(workspace)
+    if (self === null || sync.swapping) return []
+    return workspaceRow.filter(function(id) {
+      return Model.normalizeWorkspaceId(id) !== null && id !== self
+    })
   }
 
   // One workspace back to Hyprland's own tiling, without touching the rest:
@@ -1755,7 +1775,7 @@ Panel {
         // otherwise hang off it.
         x: Math.max(0, Math.min(root.menuX, parent.width - width))
         y: Math.max(0, Math.min(root.menuY, parent.height - height))
-        width: Style.space(160)
+        width: Style.space(200)
         height: menuColumn.implicitHeight + Style.spacing.xs * 2
         radius: Style.cornerRadius
         color: Color.popups.background

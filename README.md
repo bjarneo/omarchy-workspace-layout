@@ -24,6 +24,7 @@ one and it stacks where you said extras should go.
 | --- | --- |
 | Omarchy (Quattro plugin runtime) | the bar widget and panel are Quickshell QML loaded by `omarchy-shell` |
 | Hyprland 0.55 or newer | `hl.layout.register`, the Lua layout API the whole plugin is built on |
+| Hyprland 0.56 or newer | `change_id`, for swapping two workspaces only; everything else works on 0.55 |
 | `hyprctl` | on `PATH`; how layouts and workspace rules are applied |
 
 No other runtime, package, background service, network access, or privileged
@@ -63,8 +64,10 @@ else in it is pointed at rather than typed.
 **Workspace strip.** Every workspace with the shape it is running. Click one and
 you go there: the windows move under the cursor as you drag, which is worth
 something only if you are looking at them. Right-click one for what to do with
-the workspace itself — hand it back to Hyprland, capture the windows on it, or
-release the apps pinned to it.
+the workspace itself — hand it back to Hyprland, capture the windows on it,
+release the apps pinned to it, or swap it with another workspace. A swap trades
+the two numbers: windows, tiling, layout, pins and the `at login` mark all stay
+with their workspace, and swapping the same two again puts them back.
 
 **Named workspaces.** A workspace does not have to have a number. Plugins that
 give each monitor its own set — [omarchy-per-monitor-workspaces][pmw], say —
@@ -323,8 +326,8 @@ omarchy-shell workspace-layout apply focus
 ```
 
 `status`, `workspace`, `json`, `profiles`, `layouts`, `apply`, `set`, `reset`,
-`pin`, `unpin`, `catchapp`, `capture`, `launch`, and the panel's own `toggle` /
-`open` / `close`. `catchapp` takes a layout, an app and its places; no places
+`swap`, `pin`, `unpin`, `catchapp`, `capture`, `launch`, and the panel's own
+`toggle` / `open` / `close`. `catchapp` takes a layout, an app and its places; no places
 releases it. Every command, what it prints, and a worked example are in
 [docs/cli.md](docs/cli.md).
 
@@ -399,6 +402,12 @@ checks the file exists first, so leaving it does no harm. Workspaces return to
   interface has no resize hook, so `SUPER` + right-drag does nothing inside these
   layouts. Drag the panel's dividers, or use `[` and `]`. Ratios set that way are
   named and saved, which the mouse gesture never was.
+- **A swap is numbers only.** Swapping trades workspace numbers 1 to 99 and
+  needs Hyprland 0.56 for its `change_id` dispatcher; named workspaces cannot be
+  swapped. A `persistent` rule stays with the number rather than the workspace,
+  which is how Hyprland treats it. Omarchy's own Super+L files for the two
+  numbers are removed, since they would put the old layouts back; the next
+  press recreates them.
 - **Special workspaces are left alone.** `special:scratchpad` and friends are an
   overlay with their own rules about what may live in them, and none of this has
   been tried against one. Numbered and named workspaces both work.
