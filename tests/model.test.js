@@ -2366,3 +2366,205 @@ test("the manifest matches what the shell and the CLI validator require", () => 
   }
   assert.ok(["left", "center", "right"].includes(manifest.barWidget.defaultSection))
 })
+
+// ------------------------------------------------- swapping workspace numbers
+//
+// A swap renumbers two workspaces in Hyprland and moves everything the active
+// profile keeps by number along with them. The document half is a pure
+// function; the live half is Lua run here against a fake `hl` that records
+// what it was asked to do, in order.
+
+function swapFixture() {
+  return Model.normalizeConfig({
+    activeProfile: "default",
+    layouts: [{ id: "focus", name: "Focus", weights: [25, 50, 25] }],
+    profiles: [
+      {
+        name: "default",
+        fallback: "dwindle",
+        assignments: { 2: "master", 7: "focus" },
+        monitors: { "DP-1": "focus" },
+        catches: { focus: { kitty: [2] } },
+        pins: {
+          foot: { workspace: 2, slots: [1, 2], name: "Foot", command: "foot -e btop" },
+          zed: 7,
+          discord: 9
+        },
+        autostart: [2, 9]
+      },
+      { name: "writing", fallback: "scrolling", assignments: { 2: "focus" }, pins: { obsidian: 2 } }
+    ]
+  })
+}
+
+test("swapping two workspaces trades their layouts, pins and at-login mark", () => {
+  const next = Model.swappedWorkspaces(swapFixture(), 2, 7)
+  const profile = next.profiles[0]
+  assert.deepEqual(profile.assignments, { 2: "focus", 7: "master" })
+  assert.deepEqual(profile.pins.foot,
+    { workspace: "7", slots: [1, 2], name: "Foot", command: "foot -e btop" })
+  assert.equal(profile.pins.zed.workspace, "2")
+  assert.equal(profile.pins.discord.workspace, "9")
+  assert.deepEqual(profile.autostart, ["7", "9"])
+})
+
+test("a swap leaves what is not keyed by workspace alone", () => {
+  const before = swapFixture()
+  const next = Model.swappedWorkspaces(before, 2, 7)
+  assert.deepEqual(next.layouts, before.layouts)
+  assert.deepEqual(next.profiles[0].monitors, before.profiles[0].monitors)
+  assert.deepEqual(next.profiles[0].catches, before.profiles[0].catches)
+  assert.equal(next.profiles[0].fallback, before.profiles[0].fallback)
+  assert.deepEqual(next.profiles[1], before.profiles[1])
+  // The input document is not touched.
+  assert.deepEqual(before, swapFixture())
+})
+
+test("a workspace with nothing assigned stays that way after a swap", () => {
+  const config = Model.normalizeConfig({
+    profiles: [{ name: "default", assignments: { 2: "master" }, autostart: [2] }]
+  })
+  const next = Model.swappedWorkspaces(config, 2, 7)
+  assert.deepEqual(next.profiles[0].assignments, { 7: "master" })
+  assert.equal("2" in next.profiles[0].assignments, false)
+  assert.deepEqual(next.profiles[0].autostart, ["7"])
+})
+
+test("swapping twice restores the document", () => {
+  const original = swapFixture()
+  const back = Model.swappedWorkspaces(Model.swappedWorkspaces(original, 2, 7), 7, 2)
+  assert.deepEqual(back, original)
+})
+
+test("a swap that would change nothing is null", () => {
+  const config = swapFixture()
+  assert.equal(Model.swappedWorkspaces(config, 2, 2), null)
+  assert.equal(Model.swappedWorkspaces(config, 3, 4), null)
+  assert.equal(Model.swappedWorkspaces(config, 0, 2), null)
+  assert.equal(Model.swappedWorkspaces(config, 2, 100), null)
+  assert.equal(Model.swappedWorkspaces(config, "name:code", 2), null)
+  assert.equal(Model.swappedWorkspaces(config, "two", 2), null)
+  // Same layout on both sides and nothing else keyed to either: still nothing.
+  const same = Model.normalizeConfig({
+    profiles: [{ name: "default", assignments: { 2: "master", 7: "master" } }]
+  })
+  assert.equal(Model.swappedWorkspaces(same, 2, 7), null)
+})
+
+// A fake Hyprland for the live half. Workspaces are tables with an id and a
+// layout; `change_id` re-keys them, and, like the real one, does nothing but
+// warn when the target id is taken. Every rule and move is logged in order.
+function swapLuaPrelude(workspaces, options) {
+  const opts = options || {}
+  const rows = workspaces.map((ws) =>
+    `byId[${ws.id}] = { id = ${ws.id}, name = "${ws.name}", tiled_layout = "${ws.layout}" }`)
+  return [
+    "LOG = {}",
+    "byId = {}",
+    "persistent = {}",
+    ...rows,
+    "hl = {",
+    "  get_workspace = function(id) return byId[id] end,",
+    "  get_workspaces = function()",
+    "    local out = {}",
+    "    for _, ws in pairs(byId) do out[#out + 1] = ws end",
+    "    return out",
+    "  end,",
+    "  workspace_rule = function(spec)",
+    '    local flag = spec.persistent == nil and "" or (spec.persistent and " persistent" or " not persistent")',
+    '    LOG[#LOG + 1] = "rule " .. spec.workspace .. " " .. tostring(spec.layout) .. flag',
+    "    persistent[tonumber(spec.workspace)] = spec.persistent and spec.layout or nil",
+    "    return {}",
+    "  end,",
+    // A persistent rule for a number nobody has brings that workspace into
+    // being on the next scheduled pass, which is what the swap asks for.
+    "  exec_scheduled_prop_refresh_immediately = function()",
+    opts.refreshIgnored ? "" : [
+      "    for id, layout in pairs(persistent) do",
+      '      if not byId[id] then byId[id] = { id = id, name = "ws" .. id, tiled_layout = layout } end',
+      "    end"
+    ].join("\n"),
+    "  end,",
+    opts.dispatchIgnored ? "  dispatch = function() end," : "  dispatch = function(d) d() end,",
+    "  dsp = { workspace = {",
+    opts.noChangeId ? "" : [
+      "    change_id = function(o)",
+      "      return function()",
+      '        LOG[#LOG + 1] = "move " .. o.workspace.name .. " " .. o.id',
+      "        if byId[o.id] then return end",
+      "        byId[o.workspace.id] = nil",
+      "        o.workspace.id = o.id",
+      "        byId[o.id] = o.workspace",
+      "      end",
+      "    end"
+    ].join("\n"),
+    "  } }",
+    "}"
+  ].join("\n")
+}
+
+function runSwapLua(prelude, a, b) {
+  return runLua([prelude, Model.evalPayload(Model.swapWorkspacesLua(a, b)),
+    'print(table.concat(LOG, "\\n"))'].join("\n")).trim().split("\n")
+}
+
+test("the live swap parks each destination's rule before moving into it", () => {
+  const prelude = swapLuaPrelude([
+    { id: 2, name: "A", layout: "master" },
+    { id: 7, name: "B", layout: "dwindle" },
+    { id: 2147483647, name: "top", layout: "dwindle" }
+  ])
+  assert.deepEqual(runSwapLua(prelude, 2, 7), [
+    "rule 2147483646 master",
+    "move A 2147483646",
+    "rule 2 dwindle",
+    "move B 2",
+    "rule 7 master",
+    "move A 7"
+  ])
+})
+
+test("a swap with one live workspace first makes the other exist, then lets it go", () => {
+  const prelude = swapLuaPrelude([{ id: 7, name: "B", layout: "lua:omarchy-wsl-focus" }])
+  assert.deepEqual(runSwapLua(prelude, 2, 7), [
+    "rule 2 lua:omarchy-wsl-focus persistent",
+    "rule 2147483647 lua:omarchy-wsl-focus",
+    "move ws2 2147483647",
+    "rule 2 lua:omarchy-wsl-focus",
+    "move B 2",
+    "rule 7 lua:omarchy-wsl-focus",
+    "move ws2 7",
+    // Persistence was set on number 2, where the live workspace now sits, so
+    // it is lifted there; nothing keeps the empty one on 7.
+    "rule 2 lua:omarchy-wsl-focus not persistent"
+  ])
+})
+
+test("a workspace that could not be made to exist stops the swap before anything moves", () => {
+  const prelude = swapLuaPrelude([{ id: 7, name: "B", layout: "master" }], { refreshIgnored: true })
+  assert.throws(() => runSwapLua(prelude, 2, 7), /workspace 2 could not be created/)
+})
+
+test("a swap with neither workspace live touches nothing in Hyprland", () => {
+  assert.deepEqual(runSwapLua(swapLuaPrelude([]), 2, 7), [""])
+})
+
+test("a move that did not land is reported, not trusted", () => {
+  const prelude = swapLuaPrelude([
+    { id: 2, name: "A", layout: "master" },
+    { id: 7, name: "B", layout: "dwindle" }
+  ], { dispatchIgnored: true })
+  assert.throws(() => runSwapLua(prelude, 2, 7), /workspaces 2 and 7 did not swap/)
+})
+
+test("a Hyprland without change_id is told so before anything moves", () => {
+  const prelude = swapLuaPrelude([{ id: 2, name: "A", layout: "master" }], { noChangeId: true })
+  assert.throws(() => runSwapLua(prelude, 2, 7), /needs Hyprland 0\.56 or newer/)
+})
+
+test("the live swap refuses what the document half refuses", () => {
+  assert.equal(Model.swapWorkspacesLua(2, 2), "")
+  assert.equal(Model.swapWorkspacesLua(0, 2), "")
+  assert.equal(Model.swapWorkspacesLua("name:code", 2), "")
+  assert.match(Model.swapWorkspacesLua(2, 7), /hl\.get_workspace\(2\), hl\.get_workspace\(7\)/)
+})

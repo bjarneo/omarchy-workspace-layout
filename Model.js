@@ -2894,6 +2894,141 @@ function gatherAppLua(match, workspaceId) {
   ].join("\n")
 }
 
+// ------------------------------------------------- swapping workspace numbers
+//
+// Two workspaces trade numbers. Hyprland's `change_id` renumbers the workspace
+// object, so its windows and tiling tree come along; this side moves what the
+// active profile keeps by number — the layout each was given, the apps pinned
+// there and the `at login` mark. Layouts, monitor defaults and catches are not
+// keyed by workspace, and other profiles are not in play, so none of those
+// change. Null when nothing in the document would move, which is how every
+// other "maybe edit" in this file answers.
+function swappedWorkspaces(config, a, b) {
+  var from = normalizeWorkspaceId(a)
+  var to = normalizeWorkspaceId(b)
+  if (from === null || to === null || from === to) return null
+  var draft = normalizeConfig(config)
+  var profile = activeProfile(draft)
+  var changed = false
+  if (profile.assignments[from] !== profile.assignments[to]) {
+    profile.assignments = exchangedKeys(profile.assignments, from, to)
+    changed = true
+  }
+  for (var match in profile.pins) {
+    var pin = profile.pins[match]
+    if (pin.workspace !== from && pin.workspace !== to) continue
+    pin.workspace = otherEnd(pin.workspace, from, to)
+    changed = true
+  }
+  var fromAtLogin = profile.autostart.indexOf(from) !== -1
+  var toAtLogin = profile.autostart.indexOf(to) !== -1
+  if (fromAtLogin !== toAtLogin) {
+    profile.autostart = normalizeAutostart(profile.autostart.map(function(id) {
+      return otherEnd(id, from, to)
+    }))
+    changed = true
+  }
+  return changed ? draft : null
+}
+
+// The other end of a swap: a key that is one of the two becomes the other.
+function otherEnd(key, a, b) {
+  return key === a ? b : (key === b ? a : key)
+}
+
+// Two keys of a map trade places. An absent key stays absent, so a workspace
+// with no entry does not gain one.
+function exchangedKeys(map, a, b) {
+  var out = {}
+  for (var key in map) out[otherEnd(key, a, b)] = map[key]
+  return out
+}
+
+// The live half of a swap, for `hyprctl eval`. Self-contained like
+// gatherAppLua: it must run on a session whose generated file predates it.
+//
+// Workspace rules are keyed by number and re-apply the moment a workspace
+// arrives at a new one, so a workspace that simply moved would be re-tiled
+// into whatever layout its new number had, and a tree that passes through a
+// foreign layout comes back rearranged. Each destination — the spare number
+// included — is therefore given the arriving workspace's own layout *before*
+// the move. The sync that follows the document swap reissues the same rules,
+// which updates them in place and re-tiles nothing.
+//
+// A `change_id` onto a number that is taken only warns, so the outcome is
+// checked at the end rather than trusted. Nothing here disables a rule: a
+// rule is one object per number, and disabling it is not undone by reissuing.
+// Neither workspace live is not an error — the document half still applies.
+//
+// With one workspace live, the other is made to exist first, with a
+// `persistent` rule that is lifted again once it has moved, and the swap is
+// then the same two-workspace exchange. A plain renumbering is announced in
+// no way Quickshell understands, so the shell would keep showing the old
+// number; a workspace being created and an empty one being destroyed are
+// ordinary events, and it follows both.
+function swapWorkspacesLua(a, b) {
+  var from = normalizeWorkspaceId(a)
+  var to = normalizeWorkspaceId(b)
+  if (from === null || to === null || from === to) return ""
+  var pair = "workspaces " + from + " and " + to
+  return [
+    'if type(hl.dsp.workspace.change_id) ~= "function" then',
+    '  error("swapping ' + pair + ' needs Hyprland 0.56 or newer", 0)',
+    "end",
+    "local first, second = hl.get_workspace(" + from + "), hl.get_workspace(" + to + ")",
+    "local function park(id, layout)",
+    "  hl.workspace_rule({ workspace = tostring(id), layout = layout })",
+    "end",
+    "local function move(ws, id)",
+    "  hl.dispatch(hl.dsp.workspace.change_id({ workspace = ws, id = id }))",
+    "end",
+    "local function summon(id, layout)",
+    "  hl.workspace_rule({ workspace = tostring(id), layout = layout, persistent = true })",
+    // A rule takes effect on the compositor's next scheduled pass, which is
+    // after this evaluation returns; asking for it now is what makes the
+    // workspace exist in time to be swapped.
+    "  hl.exec_scheduled_prop_refresh_immediately()",
+    "  local ws = hl.get_workspace(id)",
+    "  if not ws then",
+    "    hl.workspace_rule({ workspace = tostring(id), layout = layout, persistent = false })",
+    '    error("workspace " .. id .. " could not be created", 0)',
+    "  end",
+    "  return ws",
+    "end",
+    "local made = nil",
+    "if first and not second then",
+    "  second = summon(" + to + ", first.tiled_layout)",
+    "  made = " + to,
+    "elseif second and not first then",
+    "  first = summon(" + from + ", second.tiled_layout)",
+    "  made = " + from,
+    "end",
+    "if first and second then",
+    "  local used = {}",
+    "  for _, ws in pairs(hl.get_workspaces()) do used[ws.id] = true end",
+    "  local spare = 2147483647",
+    "  while used[spare] do spare = spare - 1 end",
+    "  local first_layout, second_layout = first.tiled_layout, second.tiled_layout",
+    "  park(spare, first_layout)",
+    "  move(first, spare)",
+    "  park(" + from + ", second_layout)",
+    "  move(second, " + from + ")",
+    "  park(" + to + ", first_layout)",
+    "  move(first, " + to + ")",
+    "end",
+    // Persistence was set on the summoned number, where the live workspace
+    // now sits; the empty one has the vacated number and nothing keeping it.
+    "if made then",
+    "  local ws = hl.get_workspace(made)",
+    "  hl.workspace_rule({ workspace = tostring(made), layout = ws and ws.tiled_layout or nil, persistent = false })",
+    "end",
+    "if (first and hl.get_workspace(" + to + ") ~= first)",
+    "    or (second and hl.get_workspace(" + from + ") ~= second) then",
+    '  error("' + pair + ' did not swap", 0)',
+    "end"
+  ].join("\n")
+}
+
 // --------------------------------------------------------------- reporting
 
 // One line about a workspace, for `workspace-layout status`. Written for a
@@ -3156,6 +3291,8 @@ if (typeof module !== "undefined") {
     launchToken: launchToken,
     matchLaunchedWindows: matchLaunchedWindows,
     gatherAppLua: gatherAppLua,
+    swappedWorkspaces: swappedWorkspaces,
+    swapWorkspacesLua: swapWorkspacesLua,
     uniqueProfileName: uniqueProfileName,
     luaLayoutName: luaLayoutName,
     luaLayoutRef: luaLayoutRef,
