@@ -15,7 +15,7 @@ documentation — read it yourself, or point a tool at it explicitly.
 | `LayoutCanvas.qml` | The drag-to-resize editor. |
 | `LayoutThumb.qml` | Non-interactive miniature, used by the bar icon and the chips. |
 | `ConfigStore.qml` | The JSON document on disk, normalized on every read. |
-| `HyprlandSync.qml` | Config document → live Hyprland, via the generated Lua and `hyprctl eval`. Also the one-shot app gather, which needs its own process: the sync queue is latest-wins and a pin fires both. |
+| `HyprlandSync.qml` | Config document → live Hyprland, via the generated Lua and `hyprctl eval`. Also the one-shot app gather, which needs its own process: the sync queue is latest-wins and a pin fires both. And the workspace swap, which needs a third: it has to report back, because the document is only swapped once Hyprland has. |
 | `Panel.qml` | The UI. Owns its own store and sync — see below. |
 | `Service.qml` | Optional background sync for a bar-less install. |
 | `docs/development.md` | This file: how the pieces fit and what will bite you. |
@@ -163,9 +163,39 @@ Established by probing 0.56.2; the Lua stubs are at `/usr/share/hypr/stubs/hl.me
 - `hl.workspace_rule({ workspace = ..., layout = ... })` updates an existing
   selector in place. Reissuing a rule preserves fields such as `monitor`,
   `persistent`, and `enabled`; do not disable the previous returned handle.
-- Changing a spec does not re-tile anything. `hl.dispatch(hl.dsp.layout(msg))`
+- Changing a *layout spec* does not re-tile anything. `hl.dispatch(hl.dsp.layout(msg))`
   reaches the *active* workspace's layout only, and raises on a workspace running
-  a built-in — hence the `pcall` in `W.relayout`.
+  a built-in — hence the `pcall` in `W.relayout`. Changing a *workspace rule's*
+  `layout` is different: the workspace re-tiles at once.
+- `hl.dsp.workspace.change_id({ workspace = ws, id = n })` renumbers a workspace
+  object. Its windows, tiling tree, focus, groups and fullscreen state come
+  along, and the monitor's active workspace follows. Onto a number that is
+  taken it **warns and returns success** — check `hl.get_workspace(n)` afterwards
+  rather than trusting the call.
+- Workspace rules are keyed by number and re-apply the moment a workspace
+  arrives at a new one, so a renumbered workspace is re-tiled into whatever its
+  new number's rule says, and a tree that passes through a foreign layout comes
+  back rearranged. `swapWorkspacesLua` therefore gives each destination — the
+  spare number included — the arriving workspace's own `tiled_layout` before
+  moving it. `persistent` follows the number the same way: an empty persistent
+  workspace renumbered away is destroyed and its number comes back empty.
+- `hyprctl eval` prints `ok` and discards any returned value. A Lua
+  `error(msg, 0)` prints `error: msg` and exits 7. Both go to **stdout**; that
+  is the whole reply channel, which is why the swap process reads the exit code
+  and stdout.
+- **Quickshell 0.3.1 does not follow `changeworkspaceid`.** Hyprland announces
+  a renumbering on the event socket and Quickshell has no handler for it, so
+  after a swap `Hyprland.workspaces` still carries the old monitors and
+  `focusedWorkspace` the old number. `refreshWorkspaces()` and
+  `refreshMonitors()` re-read the ids Quickshell already knows, which is why
+  the panel calls both once a swap is confirmed — but they never add a number
+  it has not seen. A swap onto an empty number therefore first makes that
+  workspace exist with a `persistent` rule: its creation, and the empty one's
+  destruction on the vacated number, are ordinary events Quickshell follows.
+- **`hyprctl -j workspaces` names the wrong Lua layout.** With more than one
+  Lua layout registered, its `tiledLayout` field can report another layout's
+  name for a workspace running one of this plugin's. The Lua API's
+  `tiled_layout` and the window geometry are correct; check those.
 - `hl.window_rule({ ... })`'s `name` is a **label**, not the rule. The rule is
   sibling fields on the same table — `workspace = "9 silent"`, `float = true` —
   the way `/usr/share/hypr/hyprland.lua` writes them. A spec of

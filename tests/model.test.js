@@ -2568,3 +2568,23 @@ test("the live swap refuses what the document half refuses", () => {
   assert.equal(Model.swapWorkspacesLua("name:code", 2), "")
   assert.match(Model.swapWorkspacesLua(2, 7), /hl\.get_workspace\(2\), hl\.get_workspace\(7\)/)
 })
+
+test("swapping two workspaces asks Hyprland first and the document second", () => {
+  const sync = fs.readFileSync(path.join(__dirname, "..", "HyprlandSync.qml"), "utf8")
+  assert.match(sync, /function swap\(from, to\)/)
+  // Its own process: the sync queue is latest-wins, and the gather queue never
+  // reports back, which a swap must.
+  assert.match(sync, /id: swapProcess/)
+  assert.match(sync, /if \(lua === "" \|\| swapProcess\.running\) return false/)
+  assert.match(sync, /signal swapped\(string from, string to\)/)
+  assert.match(sync, /signal swapFailed\(string from, string to, string message\)/)
+
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  assert.match(qml, /function swapWorkspaces\(from, to\)/)
+  // The document is swapped only once the compositor has confirmed, so a
+  // refused swap leaves the file as it was.
+  assert.match(qml,
+    /function onSwapped\(from, to\)[\s\S]{0,200}?Model\.swappedWorkspaces\(root\.config, from, to\)/)
+  assert.match(qml, /function swap\(a: string, b: string\): string/)
+  assert.match(qml, /if \(!root\.swapWorkspaces\(from, to\)\) return "a swap is already underway"/)
+})

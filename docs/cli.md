@@ -133,6 +133,24 @@ $ omarchy-shell workspace-layout reset 3
 workspace 3 handed back to Hyprland
 ```
 
+### `swap <a> <b>`
+
+Two workspaces trade numbers. Windows and tiling go with their workspace, and
+so does what the profile keeps by number: the layout each was given, the apps
+pinned there, and its `at login` mark. A workspace that does not exist yet is
+fine — the one that does takes its number.
+
+```
+$ omarchy-shell workspace-layout swap 2 7
+swapping workspace 2 and workspace 7
+```
+
+Numbered workspaces only, 1 to 99, on Hyprland 0.56 or newer. Swapping the
+same two again puts everything back. The reply comes when Hyprland has been
+asked; a swap it refuses is logged by the shell and changes nothing on disk.
+Omarchy's own Super+L files for the two numbers are removed, since they would
+put the old layouts back; the next press recreates them.
+
 ### `pin <app> <workspace> <slots>`
 
 Send an app to a workspace, optionally into particular places. `<app>` is a

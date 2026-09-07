@@ -518,6 +518,43 @@ Panel {
     sync.sync()
   }
 
+  // Two workspaces trade numbers: Hyprland first, then the document, so a
+  // swap the compositor refuses changes nothing on disk. The document half
+  // runs from `onSwapped`, once Hyprland has confirmed. What `swap` on the
+  // command line does. False when a swap is already underway.
+  function swapWorkspaces(from, to) {
+    return sync.swap(from, to)
+  }
+
+  Connections {
+    target: sync
+    function onSwapped(from, to) {
+      var next = Model.swappedWorkspaces(root.config, from, to)
+      if (next) store.save(next)
+      // Omarchy's Super+L files are keyed by number too, and would put the
+      // old layouts back on the next press. The next press recreates them.
+      toggles.forget([from, to])
+      // Hyprland announces a renumbering as `changeworkspaceid`, which
+      // Quickshell does not follow, so its view of the two numbers is stale:
+      // the wrong monitors, a focused workspace that no longer exists, and
+      // windows still listed under their old numbers, which is what the bar
+      // reads to grey out an empty workspace. Asking it to re-read all three
+      // brings them up to date, and the monitor change that answers re-syncs
+      // with the right defaults.
+      Hyprland.refreshWorkspaces()
+      Hyprland.refreshMonitors()
+      Hyprland.refreshToplevels()
+      root.refreshAppState()
+      // The Lua parked each workspace's own layout on its new number before
+      // moving it, so this reissues the same rules and re-tiles nothing.
+      sync.sync()
+    }
+    function onSwapFailed(from, to, message) {
+      console.warn("workspace-layout: workspaces " + from + " and " + to +
+        " were not swapped:", message)
+    }
+  }
+
   // The one place a pin is written. Everything a pin remembers that the caller
   // did not mention is carried over — the readable name, and the command that
   // produced its window. Losing the command silently unlaunches the app: no
@@ -1451,6 +1488,7 @@ Panel {
   }
 
   OmarchyToggleFollow {
+    id: toggles
     config: store.config
     active: store.ready
     onFollowed: function(document) { store.save(document) }
@@ -1587,6 +1625,19 @@ Panel {
       if (id === null) return "workspace " + workspace + " is out of range"
       root.resetWorkspace(id)
       return "workspace " + id + " handed back to Hyprland"
+    }
+
+    // Two workspaces trade numbers, windows and all. Answers once Hyprland has
+    // been asked, the way `set` and `apply` do; the document follows when the
+    // compositor confirms, and a swap it refuses is logged, not applied.
+    function swap(a: string, b: string): string {
+      var from = Model.normalizeWorkspaceId(a)
+      var to = Model.normalizeWorkspaceId(b)
+      if (from === null) return "workspace " + a + " is not a number from 1 to 99"
+      if (to === null) return "workspace " + b + " is not a number from 1 to 99"
+      if (from === to) return "nothing to swap: both are workspace " + from
+      if (!root.swapWorkspaces(from, to)) return "a swap is already underway"
+      return "swapping workspace " + from + " and workspace " + to
     }
 
     function pin(app: string, workspace: string, slots: string): string {

@@ -89,6 +89,20 @@ Item {
     }
   }
 
+  // After two workspaces trade numbers, their Super+L files still say the old
+  // numbers, and the next scan would put the old layouts back. Drop the two;
+  // the next press recreates its file from the live layout.
+  function forget(ids) {
+    var command = ["rm", "-f", "--"]
+    for (var i = 0; i < ids.length; i++) command.push(root.dir + "/" + ids[i] + ".lua")
+    forgetProcess.command = command
+    forgetProcess.running = true
+  }
+
+  Process {
+    id: forgetProcess
+  }
+
   Timer {
     id: scanTimer
     interval: 80

@@ -150,6 +150,50 @@ Item {
     if (!gatherProcess.running) flushGather()
   }
 
+  // ------------------------------------------------------------------- swap
+  //
+  // Two workspaces trading numbers. Its own process rather than a queue: the
+  // sync queue is latest-wins and a swap is no delta a later one supersedes,
+  // and the gather queue never reports back, which a swap must — the document
+  // is only swapped once Hyprland has. One at a time: a second request while
+  // one runs is refused, since it would be built from numbers about to change.
+  readonly property bool swapping: swapProcess.running
+
+  signal swapped(string from, string to)
+  signal swapFailed(string from, string to, string message)
+
+  property string swapFrom: ""
+  property string swapTo: ""
+
+  function swap(from, to) {
+    var lua = Model.swapWorkspacesLua(from, to)
+    if (lua === "" || swapProcess.running) return false
+    swapFrom = String(from)
+    swapTo = String(to)
+    swapProcess.command = Model.hyprctlEvalArgs(lua)
+    swapProcess.running = true
+    return true
+  }
+
+  Process {
+    id: swapProcess
+    // hyprctl answers on stdout: "ok", or "error: <message>" with exit code 7
+    // when the Lua raised. The exit code is the verdict; the text is for the log.
+    stdout: StdioCollector {
+      id: swapReply
+      // Hold `exited` until the reply is complete, so it is there to read.
+      waitForEnd: true
+    }
+    onExited: function(exitCode, exitStatus) {
+      if (exitCode === 0) {
+        root.swapped(root.swapFrom, root.swapTo)
+        return
+      }
+      var message = String(swapReply.text || "").trim().replace(/^error:\s*/, "")
+      root.swapFailed(root.swapFrom, root.swapTo, message || "hyprctl exited " + exitCode)
+    }
+  }
+
   // ------------------------------------------------------------------ files
 
   FileView {
