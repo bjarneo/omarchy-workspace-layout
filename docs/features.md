@@ -13,6 +13,8 @@ Everything the plugin does, in one list.
   using a Hyprland window rule
 - Pin an app to a numbered place, or to several places at once
 - Put several apps in one place; whichever is open takes it
+- Group several windows of one app into a Hyprland tab group occupying one place
+- Capture a tab group as one place, and open it again as a group at login
 - Search every app installed on the machine, not just what is running
 - Read names and launch commands from desktop entries
 - One button opens everything the workspace is missing, one window per empty
@@ -51,8 +53,8 @@ Everything the plugin does, in one list.
 - The panel scrolls when it grows taller than the screen
 - Restore defaults puts back the shipped layouts, one profile, and every
   workspace on Hyprland's own tiling
-- Sixteen command-line commands: status, workspace, json, profiles, apply,
-  layouts, set, reset, pin, unpin, capture, launch, open, close, show, hide,
+- Eighteen command-line commands: status, workspace, json, profiles, apply,
+  layouts, set, reset, pin, unpin, group, capture, launch, open, close, show, hide,
   toggle
 - The config is plain JSON you can edit by hand, and it reloads within a second
 - Anything malformed in it is repaired rather than refused

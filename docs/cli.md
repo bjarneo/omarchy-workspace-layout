@@ -145,11 +145,30 @@ $ omarchy-shell workspace-layout unpin ghostty
 ghostty released
 ```
 
+### `group <app> <count>`
+
+Put the app's windows in one Hyprland tab group occupying its first slot.
+`<count>` is how many windows to open into that group; pass `0` or `""` to
+leave them as ordinary tiles again.
+
+```
+$ omarchy-shell workspace-layout group outlook 4
+outlook grouped ×4
+
+$ omarchy-shell workspace-layout group outlook 0
+outlook no longer grouped
+```
+
+The app must already be pinned. Capture of a workspace that is already grouped
+writes this for you.
+
 ### `capture <workspace>`
 
 Read the workspace back into a layout: the shape its windows are already in
 becomes a new layout assigned to it, and every app is pinned to the place it
-was in. Two windows of the same app become two places on one pin.
+was in. Two windows of the same app become two places on one pin. Windows
+already in a Hyprland tab group become one place, with `group` set to how
+many tabs it held.
 
 ```
 $ omarchy-shell workspace-layout capture 9
@@ -159,7 +178,8 @@ captured workspace 9
 ### `launch <workspace>`
 
 Open what the workspace is short of: for every app pinned there, one window per
-place it was given, minus the windows it already has. Apps with no launcher and
+place it was given, minus the windows it already has. A grouped pin opens that
+many windows and then tabs them together. Apps with no launcher and
 no remembered command are skipped — there is nothing to run.
 
 A `Terminal=true` app (`nvim`, `btop`, a TUI player) is opened in your terminal

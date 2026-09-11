@@ -126,6 +126,13 @@ A place can hold several apps and an app several places: aim a slot and click
 each app you want there, and whichever is open takes it. If you want both on
 screen at once, split the place in two instead.
 
+Several windows of the *same* app can share a place as a Hyprland tab group —
+the thing `Super + G` makes by hand. Capture a workspace that already has one
+and the pin remembers it: `"group": 4` means four windows, one tile, tabs along
+the top. Opening the workspace, or logging in with `at login` marked, starts
+that many windows and groups them. A pin with more than one slot also offers
+**group** in the apps list, which is the same mark without recapturing.
+
 **Rearrange by dragging.** Hold a tile and carry it onto another. The tile you
 picked up fades, the one under the cursor lights up, and what you are carrying
 rides with the pointer — `Neovim ⇄ 3`, the app in your hand and the place it is
@@ -273,8 +280,8 @@ omarchy-shell workspace-layout apply focus
 ```
 
 `status`, `workspace`, `json`, `profiles`, `layouts`, `apply`, `set`, `reset`,
-`pin`, `unpin`, `capture`, `launch`, and the panel's own `toggle` / `open` /
-`close`. Every command, what it prints, and a worked example are in
+`pin`, `unpin`, `group`, `capture`, `launch`, and the panel's own `toggle` /
+`open` / `close`. Every command, what it prints, and a worked example are in
 [docs/cli.md](docs/cli.md).
 
 ### A keybinding
@@ -312,7 +319,9 @@ lists the workspaces that open their pinned apps at login.
 An app pin is one line in that JSON: `"firefox": "3"` sends it to workspace 3,
 `"firefox": { "workspace": "3", "slot": 2 }` sends it to the second slot of
 whatever layout workspace 3 is running, and `"slots": [1, 3]` gives its windows
-two places to fill. A pin may also carry `"name"` — what to call an app whose
+two places to fill. `"group": 4` puts four windows of that app in one Hyprland
+tab group occupying the first slot; `"group": true` is the same thing using the
+slot count. A pin may also carry `"name"` — what to call an app whose
 window class is unreadable — and `"command"`, how to start it, which is how a
 terminal app is remembered:
 
@@ -321,6 +330,7 @@ terminal app is remembered:
   "workspace": "9", "slots": [1], "name": "Neovim",
   "command": "ghostty --gtk-single-instance=false --class=omarchy.wsl.nvim -e nvim"
 }
+"outlook": { "workspace": "1", "slots": [1], "group": 4 }
 ```
 
 The JSON is the source of truth and safe to keep in dotfiles. A hand-edit applies
@@ -361,6 +371,9 @@ checks the file exists first, so leaving it does no harm. Workspaces return to
   you put it. Switching profiles re-points the rules but does not sweep open
   windows around, and changing an app's slot shows up the next time the
   workspace re-tiles — when a window opens or closes there.
+- **Grouping is per app, not a mixed tab bar.** Four Outlook windows become one
+  group. Outlook and a browser already tabbed together capture as one place,
+  but only the app with two or more windows in that group is marked grouped.
 
 ## Development
 

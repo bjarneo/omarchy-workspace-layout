@@ -174,6 +174,10 @@ Panel {
 
   property var pendingLaunches: []
   property var launchBaseline: ({})
+  // Grouped pins whose windows have been asked for but not yet tabbed. A
+  // silent launch does not keep focus on the first window, so later ones
+  // cannot auto-join; they are grouped here once they exist.
+  property var pendingGroups: []
 
   // Furnishing the session by itself. `autostartDone` is this copy of the
   // panel having had its turn — won or lost — and the claim below is what
@@ -492,6 +496,9 @@ Panel {
     var command = changes.command || previous.command || ""
     if (name !== "") pin.name = name
     if (command !== "") pin.command = command
+    var group = changes.group !== undefined ? changes.group : previous.group
+    var grouped = Model.normalizeGroup(group, pin.slots.length)
+    if (grouped >= 2) pin.group = grouped
     target.pins[match] = pin
   }
 
@@ -594,6 +601,11 @@ Panel {
         workspace: workspace, command: command
       })
       for (var c = 0; c < wanted; c++) sync.launch(command, workspace)
+      if (list[i].group >= 2) {
+        root.pendingGroups = root.pendingGroups.concat([{
+          match: list[i].match, workspace: String(workspace), wanted: list[i].group
+        }])
+      }
     }
     // A second batch joins the first rather than replacing it — a login
     // furnishing two workspaces is two calls — and the baseline stays what was
@@ -673,6 +685,45 @@ Panel {
       if (!settled[waiting[i].match]) rest.push(waiting[i])
     }
     pendingLaunches = rest
+    root.tryGroupPending()
+  }
+
+  // Join the windows a grouped pin asked for, once enough of them are on the
+  // workspace. Called from the window poll rather than from launch itself:
+  // exec returns before the window exists.
+  function tryGroupPending() {
+    if (root.pendingGroups.length === 0) return
+    var rest = []
+    for (var i = 0; i < root.pendingGroups.length; i++) {
+      var item = root.pendingGroups[i]
+      var here = root.windowsByWorkspace[String(item.workspace)] || ({})
+      var have = Number(here[item.match]) || 0
+      if (have >= 2) sync.group(item.match, item.workspace)
+      if (have < Math.max(2, Number(item.wanted) || 2)) rest.push(item)
+    }
+    root.pendingGroups = rest
+  }
+
+  function setPinGroup(match, count) {
+    var clean = Model.normalizeAppMatch(match)
+    if (clean === null) return
+    var grouped = 0
+    store.mutate(function(draft) {
+      var target = Model.findProfile(draft, draft.activeProfile)
+      if (!target || !target.pins || !target.pins[clean]) return
+      var pin = target.pins[clean]
+      grouped = Model.normalizeGroup(count, pin.slots.length)
+      root.writePin(draft, clean, { group: grouped })
+    })
+    refreshAppState()
+    sync.sync()
+    if (grouped >= 2) {
+      root.pendingGroups = root.pendingGroups.concat([{
+        match: clean, workspace: Model.pinnedWorkspace(root.config, clean), wanted: grouped
+      }])
+      launchWatch.restart()
+      root.tryGroupPending()
+    }
   }
 
   // Move a pin onto the class its windows really carry, keeping everything
@@ -692,7 +743,8 @@ Panel {
         workspace: pin.workspace,
         slots: pin.slots,
         name: pin.name || from,
-        command: command || pin.command || ""
+        command: command || pin.command || "",
+        group: pin.group || 0
       }
       delete target.pins[from]
       root.writePin(draft, to, next)
@@ -806,7 +858,16 @@ Panel {
       // Keep whatever a learned pin was carrying: its name, and the command
       // that is the only record of how to open it.
       for (var match in shot.pins) {
-        root.writePin(draft, match, { workspace: key, slots: shot.pins[match] })
+        var captured = shot.pins[match]
+        if (captured instanceof Array) {
+          root.writePin(draft, match, { workspace: key, slots: captured })
+        } else {
+          root.writePin(draft, match, {
+            workspace: key,
+            slots: captured.slots || [],
+            group: captured.group || 0
+          })
+        }
       }
     })
     if (String(selectedWorkspace) === key) assignTarget = "workspace"
@@ -1147,7 +1208,6 @@ Panel {
       onStreamFinished: {
         try {
           var clients = JSON.parse(text)
-          var counts = {}
           var apps = {}
           // How many windows of each class each workspace holds, which is what
           // says whether a pin asking for three of something has them.
@@ -1164,13 +1224,9 @@ Panel {
               if (!here[where]) here[where] = ({})
               here[where][appClass] = (here[where][appClass] || 0) + 1
             }
-            // The layout only ever sees tiled, mapped windows, so anything else
-            // would make the canvas claim slots that are not really filled.
-            if (client.floating) continue
-            var key = String(client.workspace ? client.workspace.id : 0)
-            counts[key] = (counts[key] || 0) + 1
           }
-          root.tiledCounts = counts
+          // A tab group is one tiled target, however many windows it holds.
+          root.tiledCounts = Model.layoutTargetCounts(clients)
           root.windowsByWorkspace = here
           // Assigned only when the set actually changed: this runs every 700ms
           // while the panel is open, and a fresh array each time would rebuild
@@ -1178,6 +1234,7 @@ Panel {
           var list = Object.keys(apps).sort()
           if (list.join("\u0000") !== root.runningApps.join("\u0000")) root.runningApps = list
           root.adoptLaunched(list)
+          root.tryGroupPending()
           // The login furnishing waits for this: it is the first and only read
           // of what is already open.
           if (root.autostartWanted) {
@@ -1202,7 +1259,7 @@ Panel {
   Timer {
     // Keeps running past a close while a launch is still being waited on: the
     // app the user just asked for may take a few seconds to show a window.
-    running: root.opened || root.pendingLaunches.length > 0
+    running: root.opened || root.pendingLaunches.length > 0 || root.pendingGroups.length > 0
     interval: 700
     repeat: true
     onTriggered: root.refreshCounts()
@@ -1245,7 +1302,8 @@ Panel {
             windows.push({
               class: client.class,
               x: client.at[0], y: client.at[1],
-              w: client.size[0], h: client.size[1]
+              w: client.size[0], h: client.size[1],
+              grouped: client.grouped || []
             })
           }
           root.applyCapture(Model.captureLayout(windows), workspace)
@@ -1292,7 +1350,10 @@ Panel {
     id: launchWatch
     interval: 20000
     repeat: false
-    onTriggered: root.pendingLaunches = []
+    onTriggered: {
+      root.pendingLaunches = []
+      root.pendingGroups = []
+    }
   }
 
   // ------------------------------------------------------------------ model
@@ -1453,6 +1514,17 @@ Panel {
       if (match === null) return "no app given"
       root.unpinApp(match)
       return match + " released"
+    }
+
+    function group(app: string, count: string): string {
+      var match = Model.normalizeAppMatch(app)
+      if (match === null) return "no app given"
+      if (Model.pinnedWorkspace(root.config, match) === "") return match + " is not pinned"
+      var n = count === "" ? 0 : Math.round(Number(count))
+      if (count !== "" && count !== "0" && !(n >= 2)) return "group wants a count of 2 or more, or 0 to ungroup"
+      root.setPinGroup(match, count === "" || count === "0" ? 0 : n)
+      if (count === "" || count === "0") return match + " no longer grouped"
+      return match + " grouped ×" + Model.normalizeGroup(n, 0)
     }
 
     function capture(workspace: string): string {
@@ -2063,8 +2135,10 @@ Panel {
                     text: {
                       if (appRow.modelData.pinned) {
                         var slots = appRow.modelData.slots
-                        if (slots.length === 0) return "any slot"
-                        return (slots.length === 1 ? "slot " : "slots ") + slots.join(", ")
+                        var place = slots.length === 0 ? "any slot"
+                          : ((slots.length === 1 ? "slot " : "slots ") + slots.join(", "))
+                        if (appRow.modelData.group >= 2) return place + " · grouped"
+                        return place
                       }
                       if (appRow.modelData.elsewhere !== "") return "on " + appRow.modelData.elsewhere
                       if (appRow.modelData.literal) return "as typed"
@@ -2073,6 +2147,38 @@ Panel {
                     color: Util.alpha(root.fg, 0.5)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
+                  }
+
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: appRow.modelData.pinned
+                      && (appRow.modelData.group >= 2 || appRow.modelData.slots.length > 1)
+                    width: groupLabel.implicitWidth + Style.space(8)
+                    height: Style.space(18)
+                    radius: Style.cornerRadius
+                    color: groupHover.hovered ? Util.alpha(root.accent, 0.25) : "transparent"
+
+                    Text {
+                      id: groupLabel
+                      anchors.centerIn: parent
+                      textFormat: Text.PlainText
+                      text: appRow.modelData.group >= 2 ? "ungroup" : "group"
+                      color: groupHover.hovered ? root.accent : Util.alpha(root.fg, 0.5)
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    HoverHandler { id: groupHover }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        var app = appRow.modelData
+                        if (app.group >= 2) root.setPinGroup(app.match, 0)
+                        else root.setPinGroup(app.match, Math.max(2, app.slots.length))
+                      }
+                    }
                   }
 
                   // Releasing is its own target rather than a second meaning for

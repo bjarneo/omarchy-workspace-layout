@@ -27,7 +27,8 @@ function lua_prelude() {
     "       end,",
     "       get_windows = function() return {} end,",
     "       dispatch = function() end,",
-    "       dsp = { layout = function() end, window = { move = function() end } } }"
+    "       dsp = { layout = function() end, window = { move = function() end },",
+    "               group = { toggle = function() end } } }"
   ].join("\n")
 }
 
@@ -579,11 +580,93 @@ test("the short form of a pin is the whole pin, so the JSON stays hand-writable"
   // An app is not one window: two terminals can hold two places in the split.
   assert.deepEqual(Model.normalizePin({ workspace: 3, slots: [3, 1] }), { workspace: "3", slots: [1, 3] })
   assert.deepEqual(Model.normalizePin({ workspace: 3, slots: [2, 2] }), { workspace: "3", slots: [2] })
+  assert.deepEqual(Model.normalizePin({ workspace: 1, slots: [1, 2, 3, 4], group: true }),
+    { workspace: "1", slots: [1, 2, 3, 4], group: 4 })
+  assert.deepEqual(Model.normalizePin({ workspace: 1, slots: [1], group: 4 }),
+    { workspace: "1", slots: [1], group: 4 })
+  assert.deepEqual(Model.normalizePin({ workspace: 1, slots: [1], group: 1 }),
+    { workspace: "1", slots: [1] })
+  assert.equal(Model.pinWindowsWanted({ slots: [1], group: 4 }), 4)
+  assert.deepEqual(Model.pinLayoutSlots({ slots: [1, 2, 3, 4], group: 4 }), [1])
   // A slot that no layout could offer is not a reason to lose the pin.
   assert.deepEqual(Model.normalizePin({ workspace: 3, slot: 99 }), { workspace: "3", slots: [] })
   assert.deepEqual(Model.normalizePin({ workspace: 3, slot: "x" }), { workspace: "3", slots: [] })
   assert.equal(Model.normalizePin({ slot: 2 }), null)
   assert.equal(Model.normalizePin("special:scratchpad"), null)
+})
+
+test("a grouped pin launches that many windows into one place", () => {
+  const config = Model.normalizeConfig({
+    profiles: [{
+      name: "default",
+      fallback: "dwindle",
+      pins: {
+        outlook: { workspace: 1, slots: [1], group: 4, command: "outlook" },
+        foot: { workspace: 9, slots: [1, 2, 3] }
+      }
+    }],
+    activeProfile: "default"
+  })
+  const catalog = [
+    { match: "outlook", name: "Outlook", command: "outlook" },
+    { match: "foot", name: "Foot", command: "foot" }
+  ]
+  const missing = Model.missingApps(config, 1, catalog, {})
+  assert.equal(missing.length, 1)
+  assert.equal(missing[0].count, 4)
+  assert.equal(missing[0].group, 4)
+  // Two already here means two more, still grouped.
+  assert.equal(Model.missingApps(config, 1, catalog, { outlook: 2 })[0].count, 2)
+  assert.deepEqual(Model.missingApps(config, 1, catalog, { outlook: 4 }), [])
+  // An ungrouped pin still wants one window per slot.
+  assert.equal(Model.missingApps(config, 9, catalog, {})[0].count, 3)
+})
+
+test("capture treats a Hyprland tab group as one place", () => {
+  const members = ["0xa", "0xb", "0xc", "0xd"]
+  const grouped = members.map(() => ({
+    class: "outlook", x: 0, y: 0, w: 100, h: 200, grouped: members
+  }))
+  const shot = Model.captureLayout(grouped)
+  assert.equal(Model.totalCells(shot.layout.cells), 1)
+  assert.deepEqual(shot.pins.outlook, { slots: [1], group: 4 })
+
+  // Four ungrouped windows in a column are still four places.
+  const stacked = [0, 50, 100, 150].map((y) => ({
+    class: "outlook", x: 0, y, w: 100, h: 50, grouped: []
+  }))
+  const split = Model.captureLayout(stacked)
+  assert.equal(Model.totalCells(split.layout.cells), 4)
+  assert.deepEqual(split.pins.outlook, { slots: [1, 2, 3, 4] })
+
+  // Two side-by-side tiles, one of them a group of two, is two places.
+  const mixed = [
+    { class: "foot", x: 0, y: 0, w: 50, h: 100, grouped: [] },
+    { class: "zed", x: 50, y: 0, w: 50, h: 100, grouped: ["0x1", "0x2"] },
+    { class: "zed", x: 50, y: 0, w: 50, h: 100, grouped: ["0x1", "0x2"] }
+  ]
+  const both = Model.captureLayout(mixed)
+  assert.equal(Model.totalCells(both.layout.cells), 2)
+  assert.deepEqual(both.pins.foot, { slots: [1] })
+  assert.deepEqual(both.pins.zed, { slots: [2], group: 2 })
+})
+
+test("the layout counts a tab group as one window", () => {
+  const clients = [
+    { mapped: true, floating: false, workspace: { id: 1 }, class: "outlook",
+      address: "0xa", grouped: ["0xa", "0xb", "0xc", "0xd"] },
+    { mapped: true, floating: false, workspace: { id: 1 }, class: "outlook",
+      address: "0xb", grouped: ["0xa", "0xb", "0xc", "0xd"] },
+    { mapped: true, floating: false, workspace: { id: 1 }, class: "outlook",
+      address: "0xc", grouped: ["0xa", "0xb", "0xc", "0xd"] },
+    { mapped: true, floating: false, workspace: { id: 1 }, class: "outlook",
+      address: "0xd", grouped: ["0xa", "0xb", "0xc", "0xd"] },
+    { mapped: true, floating: false, workspace: { id: 1 }, class: "foot",
+      address: "0xe", grouped: [] },
+    { mapped: true, floating: true, workspace: { id: 1 }, class: "float",
+      address: "0xf", grouped: [] }
+  ]
+  assert.deepEqual(Model.layoutTargetCounts(clients), { "1": 2 })
 })
 
 test("a pin to a workspace that cannot hold one is dropped, not kept half-formed", () => {
@@ -893,6 +976,41 @@ test("the pinned rule Hyprland receives is the one the config describes",
     assert.equal(output.trim(), "1\t^(firefox)$\t3 silent")
   })
 
+test("a grouped pin asks Hyprland to open the window as a group",
+  { skip: luaAvailable ? false : "lua interpreter not installed" }, () => {
+    const config = Model.normalizeConfig({
+      profiles: [{
+        name: "default",
+        fallback: "dwindle",
+        pins: { outlook: { workspace: 1, slots: [1, 2, 3, 4], group: 4 } }
+      }],
+      activeProfile: "default"
+    })
+    const lua = Model.generateLua(config, [1])
+    assert.match(lua, /W\.set_app\("outlook", "\^\(outlook\)\$", "1", true\)/)
+    // Extra slots are how many windows to open, not extra tiles.
+    assert.match(lua, /W\.set_slot\("1", "outlook", \{ 1 \}\)/)
+    assert.ok(!lua.includes('W.set_slot("1", "outlook", { 1, 2, 3, 4 })'))
+
+    const output = runLua([
+      lua_prelude(),
+      lua,
+      'local p = PINS[1]',
+      'print(p.group, p.workspace)'
+    ].join("\n"))
+    assert.equal(output.trim(), "set\t1 silent")
+  })
+
+test("grouping windows already on a workspace asks by class, not by pattern",
+  { skip: luaAvailable ? false : "lua interpreter not installed" }, () => {
+    assert.equal(Model.groupAppLua("outlook", "special:x"), "")
+    const lua = Model.groupAppLua("outlook", 1)
+    assert.ok(lua.includes('{ "outlook" }'))
+    assert.ok(lua.includes("group.toggle"))
+    assert.ok(lua.includes("group:add"))
+    assert.doesNotThrow(() => runLua(`${lua_prelude()}\n${lua}\nprint("ok")`))
+  })
+
 test("a hostile pin cannot break out of the generated Lua",
   { skip: luaAvailable ? false : "lua interpreter not installed" }, () => {
     const nasty = 'evil" }) W.rules = nil hl.window_rule({ name = "x'
@@ -945,6 +1063,7 @@ test("pinning an app is wired to a click and brings its open windows along", () 
   const sync = fs.readFileSync(path.join(__dirname, "..", "HyprlandSync.qml"), "utf8")
   assert.match(sync, /function gather\(match, workspaceId\)/)
   assert.match(sync, /function launch\(command, workspaceId\)/)
+  assert.match(sync, /function group\(match, workspaceId\)/)
   // A Terminal=true app needs wrapping before it is a window at all.
   assert.match(qml, /function launchCommandFor\(app\)/)
   assert.match(qml, /terminal: entry\.runInTerminal === true/)
@@ -960,6 +1079,10 @@ test("pinning an app is wired to a click and brings its open windows along", () 
   // One window per place the app was given, not one per app.
   assert.match(qml, /for \(var c = 0; c < wanted; c\+\+\) sync\.launch/)
   assert.match(qml, /onClicked: root\.launchMissing\(String\(root\.selectedWorkspace\), root\.missingApps\)/)
+  assert.match(qml, /function tryGroupPending\(\)/)
+  assert.match(qml, /sync\.group\(item\.match, item\.workspace\)/)
+  assert.match(qml, /grouped: client\.grouped \|\| \[\]/)
+  assert.match(qml, /root\.tiledCounts = Model\.layoutTargetCounts\(clients\)/)
 })
 
 test("clicking a workspace goes there, because a layout is edited by watching it", () => {
@@ -1286,10 +1409,11 @@ test("every pin write carries what the pin already remembered", () => {
   // how to open a window called `omarchy.wsl.nvim`.
   assert.match(qml, /function writePin\(draft, match, changes\)/)
   assert.match(qml, /var command = changes\.command \|\| previous\.command \|\| ""/)
+  assert.match(qml, /var grouped = Model\.normalizeGroup\(group, pin\.slots\.length\)/)
   for (const caller of [
     /root\.writePin\(draft, clean, \{ workspace: workspace, slots: next/,
     /root\.writePin\(draft, match, \{ workspace: String\(workspace\), slots: slots \}\)/,
-    /root\.writePin\(draft, match, \{ workspace: key, slots: shot\.pins\[match\] \}\)/,
+    /root\.writePin\(draft, match, \{\s*workspace: key,\s*slots: captured\.slots \|\| \[\],/,
     /root\.writePin\(draft, to, next\)/
   ]) {
     assert.match(qml, caller)
@@ -1309,7 +1433,7 @@ test("the panel corrects a pin from what the launch opened", () => {
   // The rule is installed too late for the window that taught us the class.
   assert.match(qml, /sync\.gather\(to, workspace\)/)
   // And the watch outlives the panel: an app can take a few seconds to appear.
-  assert.match(qml, /running: root\.opened \|\| root\.pendingLaunches\.length > 0/)
+  assert.match(qml, /running: root\.opened \|\| root\.pendingLaunches\.length > 0 \|\| root\.pendingGroups\.length > 0/)
 })
 
 test("editing a shipped layout starts a copy instead of rewriting it", () => {
@@ -1408,6 +1532,9 @@ test("carrying one place onto another exchanges their apps", () => {
   // What the pin remembers survives the swap.
   assert.equal(swapped.foot.name, "Foot")
   assert.equal(swapped.zed.command, "zed")
+  assert.equal(Model.swappedPins({
+    outlook: { workspace: "1", slots: [1], group: 4 }
+  }, 1, 1, 1).outlook.group, 4)
 
   // Dropping a tile on itself changes nothing.
   assert.deepEqual(Model.swappedPins(pins, 9, 2, 2).foot.slots, [1, 2])
@@ -1807,7 +1934,7 @@ test("every command the CLI documents is answered by the panel", () => {
   const commands = [
     "open", "close", "show", "hide", "toggle",
     "status", "workspace", "json", "profiles", "apply", "layouts",
-    "set", "reset", "pin", "unpin", "capture", "launch"
+    "set", "reset", "pin", "unpin", "group", "capture", "launch"
   ]
   for (const name of commands) {
     assert.match(qml, new RegExp(`function ${name}\\(`), `ipc ${name}`)

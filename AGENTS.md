@@ -81,6 +81,14 @@ slot is eleven parts whatever the slot cap says, so the runtime builds those
 with `evenCell`, which does not clamp. Reusing `evenWeights` there silently
 drops rects past the eighth.
 
+**A Hyprland tab group is one layout target.** `hyprctl clients` lists every
+member, but the compositor hands the layout the active window only. Capture
+collapses `grouped` addresses into one place and stores `group: N` on the pin;
+the window poll counts unique groups for `tiledCounts` so a four-tab Outlook
+does not grow the layout to four stacked rows. Launch still opens N windows,
+then `groupAppLua` tabs them — a `group = "set"` window rule only groups the
+first map, and a silent launch does not keep focus for auto-join.
+
 **Slot targeting is keyed by workspace *and* class.** `W.slots[ws][class]`, read
 from `win.workspace.id` inside `recalculate`. Keyed by class alone, an app
 pinned to slot 1 of one workspace claimed slot 1 of every other workspace it

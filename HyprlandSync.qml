@@ -150,6 +150,13 @@ Item {
     if (!gatherProcess.running) flushGather()
   }
 
+  function group(match, workspaceId) {
+    var lua = Model.groupAppLua(match, workspaceId)
+    if (lua === "") return
+    pendingGathers = pendingGathers.concat([lua])
+    if (!gatherProcess.running) flushGather()
+  }
+
   // ------------------------------------------------------------------ files
 
   FileView {

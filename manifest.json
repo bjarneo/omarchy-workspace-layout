@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "bjarneo.workspace-layout",
   "name": "Workspace Layout",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Bjarne Oeverli",
   "license": "MIT",
   "description": "Decide how a Hyprland workspace splits its screen. Drag the dividers and the real windows move under your cursor — 25/50/25, a 60/40 master, thirds, a grid, or anything you drag to. Layouts are named and reusable, workspaces pick the layout they want, and profiles switch every workspace at once for work, writing, or review.",

@@ -1129,6 +1129,11 @@ function normalizeAppMatch(value) {
 //
 // `"slot": 2` is still read — it is what the short hand-written form says, and
 // what this plugin's own config said before slots could be plural.
+//
+// `group` is how many of those windows share one Hyprland tab group. They
+// still launch as that many windows, but they occupy a single place — the
+// first slot listed — the way Super+G does by hand. `"group": true` means
+// "group whatever this pin opens", and the count is taken from the slots.
 function normalizePin(value) {
   var raw = (value && typeof value === "object") ? value : { workspace: value }
   var workspace = normalizeWorkspaceId(raw.workspace)
@@ -1161,7 +1166,50 @@ function normalizePin(value) {
   // machine maps that back to "Discord".
   if (name !== null) pin.name = name.slice(0, 60)
   if (command !== "") pin.command = command
+  var group = normalizeGroup(raw.group, slots.length)
+  if (group >= 2) pin.group = group
   return pin
+}
+
+// How many windows share the pin's Hyprland tab group. A group of one is not
+// a group, so anything below 2 is stored as "not grouped" rather than as a
+// number the launcher would then have to special-case.
+function normalizeGroup(value, slotCount) {
+  if (value === true) return Math.max(Number(slotCount) || 0, 2)
+  if (value === false || value === undefined || value === null || value === "") return 0
+  var n = Math.round(Number(value))
+  if (!isFiniteNumber(n) || n < 2) return 0
+  return Math.min(n, 24)
+}
+
+// How many windows a pin wants on its workspace: a grouped pin's member
+// count, otherwise one per slot, otherwise one.
+function pinWindowsWanted(pin) {
+  if (!pin) return 1
+  if (pin.group >= 2) return pin.group
+  if (pin.slots instanceof Array && pin.slots.length > 0) return pin.slots.length
+  return 1
+}
+
+// The slots the layout should aim at. A group occupies one place — Hyprland
+// hands the layout a single target for the whole tab bar — so extra slots on
+// a grouped pin are only how many windows to open, not extra tiles.
+function pinLayoutSlots(pin) {
+  if (!pin || !(pin.slots instanceof Array) || pin.slots.length === 0) return []
+  if (pin.group >= 2) return [pin.slots[0]]
+  return pin.slots.slice()
+}
+
+// Name, command, group: everything a rewrite of the slots must not drop.
+function keepPin(pin, slots) {
+  var next = {
+    workspace: pin.workspace,
+    slots: slots instanceof Array ? slots : pin.slots
+  }
+  if (pin.name) next.name = pin.name
+  if (pin.command) next.command = pin.command
+  if (pin.group >= 2) next.group = pin.group
+  return next
 }
 
 // Hyprland matches window rules by regex, and a bare class would match every
@@ -1241,13 +1289,15 @@ function pinEntries(config) {
   var pins = (profile && profile.pins && typeof profile.pins === "object") ? profile.pins : {}
   var out = []
   for (var match in pins) {
-    out.push({
+    var entry = {
       match: match,
       workspace: pins[match].workspace,
       slots: pins[match].slots,
       name: pins[match].name || "",
       command: pins[match].command || ""
-    })
+    }
+    if (pins[match].group >= 2) entry.group = pins[match].group
+    out.push(entry)
   }
   out.sort(function(a, b) { return a.match < b.match ? -1 : (a.match > b.match ? 1 : 0) })
   return out
@@ -1362,6 +1412,7 @@ function searchApps(config, workspaceId, catalog, query, limit) {
       running: pinEntry ? pinEntry.running : false,
       pinned: true,
       slots: pin.slots,
+      group: pin.group || 0,
       elsewhere: "",
       literal: false
     })
@@ -1406,6 +1457,7 @@ function searchApps(config, workspaceId, catalog, query, limit) {
         running: found.running,
         pinned: false,
         slots: [],
+        group: 0,
         elsewhere: pinnedWorkspace(config, found.match),
         literal: false
       })
@@ -1421,6 +1473,7 @@ function searchApps(config, workspaceId, catalog, query, limit) {
       running: false,
       pinned: false,
       slots: [],
+      group: 0,
       elsewhere: pinnedWorkspace(config, typed),
       literal: true
     })
@@ -1460,7 +1513,7 @@ function missingApps(config, workspaceId, catalog, present) {
     // Nothing to run: the machine has no launcher for this class, and nobody
     // has told us one — which is what a hand-typed matcher usually is.
     if (command === "") continue
-    var wanted = pins[i].slots.length > 0 ? pins[i].slots.length : 1
+    var wanted = pinWindowsWanted(pins[i])
     var have = Number(here[pins[i].match]) || 0
     if (have >= wanted) continue
     out.push({
@@ -1470,7 +1523,8 @@ function missingApps(config, workspaceId, catalog, present) {
       command: command,
       // A remembered command is already whatever it needs to be.
       terminal: pins[i].command === "" && found ? found.terminal : false,
-      count: wanted - have
+      count: wanted - have,
+      group: pins[i].group || 0
     })
   }
   return out
@@ -1717,10 +1771,7 @@ function swappedPins(pins, workspaceId, a, b) {
       slots.push(slot === from ? to : (slot === to ? from : slot))
     }
     slots.sort(function(x, y) { return x - y })
-    var next = { workspace: pin.workspace, slots: slots }
-    if (pin.name) next.name = pin.name
-    if (pin.command) next.command = pin.command
-    out[match] = next
+    out[match] = keepPin(pin, slots)
   }
   return out
 }
@@ -1833,13 +1884,7 @@ function placeTreeToShape(layout, slots, pins, workspaceId) {
       out[match] = input[match]
       continue
     }
-    var next = {
-      workspace: pin.workspace,
-      slots: (wanted[match] || []).sort(function(x, y) { return x - y })
-    }
-    if (pin.name) next.name = pin.name
-    if (pin.command) next.command = pin.command
-    out[match] = next
+    out[match] = keepPin(pin, (wanted[match] || []).sort(function(x, y) { return x - y }))
   }
   return { weights: shape.weights, cells: shape.cells, pins: out }
 }
@@ -1920,6 +1965,95 @@ function movePlaceInto(layout, pins, workspaceId, fromPlace, toPlace, edge) {
 
 // ------------------------------------------------------------------ capture
 
+// Hyprland's `grouped` list is the addresses in one tab group. Sorted and
+// joined it is an identity: the same four windows report the same key in any
+// order, and a window that is not grouped has no key at all.
+function groupedKey(grouped) {
+  if (!(grouped instanceof Array) || grouped.length < 2) return null
+  var ids = []
+  var seen = {}
+  for (var i = 0; i < grouped.length; i++) {
+    var id = String(grouped[i] || "").trim()
+    if (id === "" || seen[id]) continue
+    seen[id] = true
+    ids.push(id)
+  }
+  if (ids.length < 2) return null
+  ids.sort()
+  return ids.join("\u0000")
+}
+
+// A Hyprland tab group is one layout target: the compositor exposes the
+// active member and hides the rest. Counting every client would grow the
+// layout for windows that do not have a place of their own.
+function layoutTargetCounts(clients) {
+  var list = (clients instanceof Array) ? clients : []
+  var seen = {}
+  var out = {}
+  for (var i = 0; i < list.length; i++) {
+    var client = list[i]
+    if (!client || client.mapped === false || client.floating) continue
+    var ws = client.workspace && client.workspace.id !== undefined
+      ? client.workspace.id : client.workspace
+    var key = normalizeWorkspaceId(ws)
+    if (key === null) continue
+    var group = groupedKey(client.grouped)
+    var ident = group !== null ? ("g:" + group) : ("w:" + String(client.address || i))
+    var mark = key + "\u0000" + ident
+    if (seen[mark]) continue
+    seen[mark] = true
+    out[key] = (out[key] || 0) + 1
+  }
+  return out
+}
+
+// Windows that share a Hyprland group occupy one box. Capture used to see
+// four Outlook windows stacked on the same rectangle and invent a four-way
+// split; collapsing first keeps the shape the compositor is actually tiling.
+function collapseGroupedWindows(windows) {
+  var list = (windows instanceof Array) ? windows : []
+  var buckets = {}
+  var order = []
+  var i
+  for (i = 0; i < list.length; i++) {
+    var raw = list[i]
+    if (!raw) continue
+    var group = groupedKey(raw.grouped)
+    var ident = group !== null ? ("g:" + group) : ("solo:" + i)
+    if (!buckets[ident]) {
+      buckets[ident] = []
+      order.push(ident)
+    }
+    buckets[ident].push(raw)
+  }
+  var out = []
+  for (i = 0; i < order.length; i++) {
+    var members = buckets[order[i]]
+    var first = members[0]
+    var classes = {}
+    var classOrder = []
+    var m
+    for (m = 0; m < members.length; m++) {
+      var match = normalizeAppMatch(members[m].class)
+      if (match === null) continue
+      if (!classes[match]) {
+        classes[match] = 0
+        classOrder.push(match)
+      }
+      classes[match]++
+    }
+    if (classOrder.length === 0) continue
+    out.push({
+      class: classOrder[0],
+      classes: classOrder,
+      counts: classes,
+      x: first.x, y: first.y, w: first.w, h: first.h,
+      groupSize: members.length
+    })
+  }
+  return out
+}
+
 // Group windows that share a band of the main axis: the columns of a columns
 // layout, the rows of a rows layout. Two windows belong together when their
 // extents overlap by more than half of the narrower one, which is loose enough
@@ -1961,17 +2095,20 @@ function bandGroups(items, startKey, sizeKey) {
 // of columns — but the arrangements people build by hand almost always are,
 // and an approximation you can then drag is worth more than a refusal.
 //
-// `windows` are `{ class, x, y, w, h }` in any consistent unit; the bounding
-// box of the set is taken as the screen, which drops the outer gap for free.
+// `windows` are `{ class, x, y, w, h, grouped? }` in any consistent unit; the
+// bounding box of the set is taken as the screen, which drops the outer gap
+// for free. `grouped` is Hyprland's list of addresses in the tab group.
 function captureLayout(windows) {
   var items = []
-  var list = (windows instanceof Array) ? windows : []
+  var collapsed = collapseGroupedWindows(windows)
   var i, j
-  for (i = 0; i < list.length; i++) {
-    var raw = list[i]
-    if (!raw) continue
+  for (i = 0; i < collapsed.length; i++) {
+    var raw = collapsed[i]
     var box = {
-      match: normalizeAppMatch(raw.class),
+      match: raw.class,
+      classes: raw.classes,
+      counts: raw.counts,
+      groupSize: raw.groupSize,
       x: Number(raw.x), y: Number(raw.y), w: Number(raw.w), h: Number(raw.h)
     }
     if (box.match === null) continue
@@ -2008,7 +2145,12 @@ function captureLayout(windows) {
     var parts = []
     for (j = 0; j < members.length; j++) {
       parts.push(extent > 0 ? members[j][crossSize] / extent * 100 : 100)
-      order.push({ slot: i, part: j, match: members[j].match })
+      order.push({
+        slot: i, part: j, match: members[j].match,
+        classes: members[j].classes || [members[j].match],
+        counts: members[j].counts || {},
+        groupSize: members[j].groupSize || 1
+      })
     }
     cells.push(parts)
   }
@@ -2041,15 +2183,25 @@ function captureLayout(windows) {
   for (i = 0; i < order.length; i++) {
     var place = placeOf[order[i].slot + ":" + order[i].part]
     if (place === undefined) continue
-    var key = order[i].match
-    if (!pins[key]) pins[key] = []
-    // Two windows of the same app become two places on one pin, which is what
-    // the pin was made plural for.
-    if (pins[key].indexOf(place) === -1) pins[key].push(place)
+    var names = order[i].classes || [order[i].match]
+    for (var c = 0; c < names.length; c++) {
+      var key = names[c]
+      if (!pins[key]) pins[key] = { slots: [], group: 0 }
+      // Two windows of the same app become two places on one pin, which is what
+      // the pin was made plural for. A group is one place, however many tabs.
+      if (pins[key].slots.indexOf(place) === -1) pins[key].slots.push(place)
+      var size = order[i].counts && order[i].counts[key]
+      if (size >= 2 && size > pins[key].group) pins[key].group = size
+    }
   }
-  for (var match in pins) pins[match].sort(function(a, b) { return a - b })
+  var captured = {}
+  for (var match in pins) {
+    pins[match].slots.sort(function(a, b) { return a - b })
+    captured[match] = { slots: pins[match].slots }
+    if (pins[match].group >= 2) captured[match].group = pins[match].group
+  }
 
-  return { layout: layout, pins: pins }
+  return { layout: layout, pins: captured }
 }
 
 // --------------------------------------------------------------------- lua
@@ -2384,12 +2536,16 @@ var LUA_RUNTIME = [
   '  W.slots[ws][class] = slots',
   'end',
   '',
-  'function W.set_app(match, pattern, ws)',
-  '  W.app_rules[match] = hl.window_rule({',
+  'function W.set_app(match, pattern, ws, grouped)',
+  '  local spec = {',
   '    name = "omarchy-wsl-pin-" .. match,',
   '    match = { class = pattern },',
   '    workspace = ws .. " silent",',
-  '  })',
+  '  }',
+  '  -- `set` makes the first window a group so later ones have somewhere to',
+  '  -- join. Joining itself is W.group_app, run once the windows exist.',
+  '  if grouped then spec.group = "set" end',
+  '  W.app_rules[match] = hl.window_rule(spec)',
   'end',
   '',
   '-- Nothing re-tiles a workspace just because its spec changed, so ask the',
@@ -2500,14 +2656,17 @@ function generateLua(config, liveWorkspaceIds, workspaceMonitors) {
   lines.push("W.reset_apps()")
   var pins = pinEntries(normalized)
   for (i = 0; i < pins.length; i++) {
+    var grouped = pins[i].group >= 2
     lines.push("W.set_app(" + luaString(pins[i].match) + ", " +
-      luaString(appPattern(pins[i].match)) + ", " + luaString(pins[i].workspace) + ")")
-    if (pins[i].slots.length === 0) continue
+      luaString(appPattern(pins[i].match)) + ", " + luaString(pins[i].workspace) +
+      (grouped ? ", true" : "") + ")")
+    var layoutSlots = pinLayoutSlots(pins[i])
+    if (layoutSlots.length === 0) continue
     // The layout callback compares classes literally, so a match it cannot
     // reduce to plain class names keeps its workspace and loses its slots.
     var keys = slotKeys(pins[i].match)
     var wanted = []
-    for (var s = 0; s < pins[i].slots.length; s++) wanted.push(luaNumber(pins[i].slots[s]))
+    for (var s = 0; s < layoutSlots.length; s++) wanted.push(luaNumber(layoutSlots[s]))
     for (var j = 0; j < keys.length; j++) {
       lines.push("W.set_slot(" + luaString(pins[i].workspace) + ", " +
         luaString(keys[j]) + ", { " + wanted.join(", ") + " })")
@@ -2566,6 +2725,48 @@ function gatherAppLua(match, workspaceId) {
   ].join("\n")
 }
 
+// Put the windows of a grouped pin into one Hyprland tab group. A window rule
+// of `group = "set"` only groups the first map, and a silent launch does not
+// keep focus on that group, so later windows would each become a group of
+// one. This is the catch-up, run once they exist, the same way gather is.
+function groupAppLua(match, workspaceId) {
+  var target = normalizeWorkspaceId(workspaceId)
+  var clean = normalizeAppMatch(match)
+  if (target === null || clean === null) return ""
+  var classes = slotKeys(clean)
+  if (classes.length === 0) return ""
+  var quoted = []
+  for (var i = 0; i < classes.length; i++) quoted.push(luaString(classes[i]))
+  return [
+    "for _, class in ipairs({ " + quoted.join(", ") + " }) do",
+    "  local ok, windows = pcall(function() return hl.get_windows({ class = class }) end)",
+    "  if ok and windows then",
+    "    local here = {}",
+    "    for i = 1, #windows do",
+    "      local w = windows[i]",
+    "      local fine, ws = pcall(function() return w.workspace and w.workspace.id end)",
+    "      if fine and ws and tostring(ws) == " + luaString(target) + " then",
+    "        here[#here + 1] = w",
+    "      end",
+    "    end",
+    "    if #here >= 2 then",
+    "      if not here[1].group then",
+    "        pcall(function() hl.dispatch(hl.dsp.group.toggle({ window = here[1] })) end)",
+    "      end",
+    "      local group = here[1].group",
+    "      if group then",
+    "        for i = 2, #here do",
+    "          if here[i].group ~= group then",
+    "            pcall(function() group:add(here[i]) end)",
+    "          end",
+    "        end",
+    "      end",
+    "    end",
+    "  end",
+    "end"
+  ].join("\n")
+}
+
 // --------------------------------------------------------------- reporting
 
 // One line about a workspace, for `workspace-layout status`. Written for a
@@ -2593,7 +2794,9 @@ function statusLine(config, workspaceId, monitorName) {
     var apps = []
     for (var i = 0; i < pins.length; i++) {
       var label = pins[i].name || pins[i].match
-      apps.push(pins[i].slots.length > 0 ? label + "@" + pins[i].slots.join(",") : label)
+      var place = pins[i].slots.length > 0 ? label + "@" + pins[i].slots.join(",") : label
+      if (pins[i].group >= 2) place += " grouped×" + pins[i].group
+      apps.push(place)
     }
     parts.push("apps " + apps.join(" "))
   }
@@ -2776,6 +2979,13 @@ if (typeof module !== "undefined") {
     layoutIdForWorkspace: layoutIdForWorkspace,
     normalizeAppMatch: normalizeAppMatch,
     normalizePin: normalizePin,
+    normalizeGroup: normalizeGroup,
+    pinWindowsWanted: pinWindowsWanted,
+    pinLayoutSlots: pinLayoutSlots,
+    keepPin: keepPin,
+    groupedKey: groupedKey,
+    collapseGroupedWindows: collapseGroupedWindows,
+    layoutTargetCounts: layoutTargetCounts,
     slotKeys: slotKeys,
     slotApps: slotApps,
     swappedPins: swappedPins,
@@ -2802,6 +3012,7 @@ if (typeof module !== "undefined") {
     launchToken: launchToken,
     matchLaunchedWindows: matchLaunchedWindows,
     gatherAppLua: gatherAppLua,
+    groupAppLua: groupAppLua,
     uniqueProfileName: uniqueProfileName,
     luaLayoutName: luaLayoutName,
     luaLayoutRef: luaLayoutRef,
