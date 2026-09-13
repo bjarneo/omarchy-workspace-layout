@@ -18,6 +18,7 @@ function lua_prelude() {
   return [
     "PINS = {}",
     "hl = { layout = { register = function() end },",
+    "       on = function() return {} end,",
     "       workspace_rule = function() return { set_enabled = function() end } end,",
     // Window rules are recorded rather than discarded: the pin tests below read
     // PINS back to prove the rule Hyprland would get says what the config does.
@@ -615,6 +616,8 @@ test("named workspace keys flow through pins, autostart, commands, and state", (
   assert.deepEqual(Model.toggledAutostart(["3"], "browser"), ["3", "name:browser"])
   assert.deepEqual(Model.withoutAutostart(["3", "name:browser"], "browser"), ["3"])
   assert.equal(Model.launchAppLua("firefox", "browser"),
+    'local W = _G.__omarchy_wsl\n' +
+    'if W and W.expect_background then W.expect_background("name:browser") end\n' +
     'hl.exec_cmd("firefox", { workspace = "name:browser silent" })')
   assert.equal(Model.focusWorkspaceCommand("browser"),
     "hyprctl dispatch 'hl.dsp.focus({ workspace = \"name:browser\" })'")
@@ -626,7 +629,7 @@ test("named workspace keys flow through pins, autostart, commands, and state", (
 
   const lua = Model.generateLua(config, [{ id: -1337, name: "browser" }])
   assert.match(lua, /W\.set_workspace\("name:browser", "lua:omarchy-wsl-focus"\)/)
-  assert.match(lua, /W\.set_app\("firefox", .*"name:browser"\)/)
+  assert.match(lua, /W\.set_app\("firefox", .*"name:browser", false\)/)
   assert.match(lua, /W\.set_slot\("name:browser", "firefox", \{ 2 \}\)/)
 
   const state = Model.stateJson(config, { "name:browser": "DP-1" }, [{ id: -1337, name: "browser" }])
@@ -762,6 +765,8 @@ test("the search reads names as well as classes, and running beats installed", (
 test("opening an app can follow it to the destination workspace", () => {
   assert.equal(
     Model.launchAppLua("nautilus", 3),
+    'local W = _G.__omarchy_wsl\n' +
+    'if W and W.expect_background then W.expect_background("3") end\n' +
     'hl.exec_cmd("nautilus", { workspace = "3 silent" })'
   )
   assert.equal(
@@ -872,7 +877,7 @@ test("the generated file installs a window rule per pin and clears the rest", ()
   })
   const lua = Model.generateLua(config, [1])
   assert.ok(lua.includes("W.reset_apps()"))
-  assert.ok(lua.includes('W.set_app("firefox", "^(firefox)$", "3")'))
+  assert.ok(lua.includes('W.set_app("firefox", "^(firefox)$", "3", false)'))
   // Slot 0 is "wherever it lands", so it teaches the layout nothing. The
   // runtime always defines W.set_slot; what must be absent is a call.
   assert.ok(!/^W\.set_slot\(/m.test(lua))
@@ -887,6 +892,29 @@ test("the generated file installs a window rule per pin and clears the rest", ()
   assert.ok(cleared.includes("W.reset_apps()"))
   // The runtime always defines W.set_app; what must be gone is any call to it.
   assert.ok(!/^W\.set_app\(/m.test(cleared))
+})
+
+test("a following profile makes pinned app rules switch to their workspace", () => {
+  const config = Model.normalizeConfig({
+    profiles: [{
+      name: "default",
+      fallback: "dwindle",
+      pins: { firefox: 3 },
+      followLaunch: true
+    }],
+    activeProfile: "default"
+  })
+  const lua = Model.generateLua(config, [1])
+
+  assert.ok(lua.includes('W.set_app("firefox", "^(firefox)$", "3", true)'))
+  assert.ok(lua.includes('workspace = ws .. " silent"'))
+  assert.ok(lua.includes('tag = follow and "omarchy-wsl-follow-window" or nil'))
+  assert.ok(lua.includes('match .. (follow and "-follow" or "-silent")'))
+  assert.ok(lua.includes('hl.on("window.open"'))
+  assert.ok(lua.includes('W.follow_window = function(win)'))
+  assert.ok(lua.includes('if not W.follow_window_installed_v2 then'))
+  assert.ok(lua.includes('function W.expect_background(ws)'))
+  assert.ok(lua.includes('if ws and W.take_background(ws) then return end'))
 })
 
 test("a layout keeps a place for an app without moving it anywhere", () => {

@@ -215,11 +215,11 @@ that has no window yet — press it after a reboot and the workspace furnishes
 itself, each app landing in the slot you gave it. Apps already running are left
 alone, and so is anything the machine has no launcher for.
 
-By default those apps open quietly while you stay where you are. Toggle
-`opening → follow` beside the button to switch to the destination workspace as
-the apps launch, so you can see that the workspace started. The choice belongs
-to the active profile; `opening → stay here` restores the quiet behavior.
-Launches marked `at login` always stay quiet.
+By default pinned apps open quietly while you stay where you are. Toggle
+`opening → follow` beside the button and any pinned app you launch switches to
+its destination workspace, whether you start it from this panel or elsewhere.
+The choice belongs to the active profile; `opening → stay here` restores the
+quiet behavior. Launches marked `at login` always stay quiet.
 
 **Or have it press itself.** Beside that button, `at login → open these` marks
 the workspace as one that starts on its own: a few seconds into the session the
@@ -365,7 +365,8 @@ a column beside another that is split into a top half and a bottom half, the
 bottom half divided into two. Three levels is the whole model; there is no
 fourth. A profile's `monitors` maps a monitor name to a layout, its `autostart`
 lists the workspaces that open their pinned apps at login, and
-`"followLaunch": true` makes manual launches switch to their destination.
+`"followLaunch": true` makes pinned apps launched manually switch to their
+destination, including apps opened outside this panel.
 
 An app pin is one line in that JSON: `"firefox": "3"` sends it to workspace 3,
 `"firefox": { "workspace": "3", "slot": 2 }` sends it to the second slot of

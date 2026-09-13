@@ -1922,7 +1922,12 @@ function launchAppLua(command, workspaceId, follow) {
   var cmd = String(command || "").replace(/[\u0000-\u001f\u007f]/g, "").trim()
   if (target === null || cmd.length === 0) return ""
   var destination = target + (follow === true ? "" : " silent")
-  return "hl.exec_cmd(" + luaString(cmd) + ", { workspace = " +
+  var background = ""
+  if (follow !== true) {
+    background = "local W = _G.__omarchy_wsl\n" +
+      "if W and W.expect_background then W.expect_background(" + luaString(target) + ") end\n"
+  }
+  return background + "hl.exec_cmd(" + luaString(cmd) + ", { workspace = " +
     luaString(destination) + " })"
 }
 
@@ -2401,6 +2406,80 @@ var LUA_RUNTIME = [
   '  return nil',
   'end',
   '',
+  '-- Pin rules always place windows silently. A single event subscription',
+  '-- follows only manually launched windows carrying the opt-in tag; launches',
+  '-- the plugin records as background (notably login furnishing) are ignored.',
+  'W.background_launches = W.background_launches or {}',
+  'W.background_timers = W.background_timers or {}',
+  '',
+  'local function remove_background(ws, token)',
+  '  local queue = W.background_launches[ws]',
+  '  if not queue then return false end',
+  '  for i = 1, #queue do',
+  '    if queue[i] == token then',
+  '      table.remove(queue, i)',
+  '      if #queue == 0 then W.background_launches[ws] = nil end',
+  '      return true',
+  '    end',
+  '  end',
+  '  return false',
+  'end',
+  '',
+  'function W.expect_background(ws)',
+  '  local queue = W.background_launches[ws] or {}',
+  '  local token = {}',
+  '  queue[#queue + 1] = token',
+  '  W.background_launches[ws] = queue',
+  '  local ok, timer = pcall(function()',
+  '    return hl.timer(function()',
+  '      remove_background(ws, token)',
+  '      W.background_timers[token] = nil',
+  '    end, { timeout = 20000, type = "oneshot" })',
+  '  end)',
+  '  if ok then W.background_timers[token] = timer',
+  '  else remove_background(ws, token) end',
+  'end',
+  '',
+  'function W.take_background(ws)',
+  '  local queue = W.background_launches[ws]',
+  '  if not queue or #queue == 0 then return false end',
+  '  local token = table.remove(queue, 1)',
+  '  if #queue == 0 then W.background_launches[ws] = nil end',
+  '  local timer = W.background_timers[token]',
+  '  if timer then pcall(function() timer:set_enabled(false) end) end',
+  '  W.background_timers[token] = nil',
+  '  return true',
+  'end',
+  '',
+  'local function tagged(win, wanted)',
+  '  if not win or not win.tags then return false end',
+  '  for i = 1, #win.tags do',
+  '    if tostring(win.tags[i]):gsub("%*$", "") == wanted then return true end',
+  '  end',
+  '  return false',
+  'end',
+  '',
+  '-- hl.on does not return an unsubscribe handle. Install one stable callback',
+  '-- and replace the function it delegates to whenever this file is reloaded.',
+  'W.follow_window = function(win)',
+  '  if type(win) ~= "userdata" then win = hl.get_window(win) end',
+  '  if not win or not tagged(win, "omarchy-wsl-follow-window") then return end',
+  '  local ws = workspace_key(win.workspace)',
+  '  if ws and W.take_background(ws) then return end',
+  '  if ws then hl.dispatch(hl.dsp.focus({ workspace = ws })) end',
+  'end',
+  'if not W.follow_window_installed_v2 then',
+  '  local ok = pcall(function()',
+  '    hl.on("window.open", function(win) W.follow_window(win) end)',
+  '  end)',
+  '  if not ok then',
+  '    ok = pcall(function()',
+  '      hl.on("openWindow", function(win) W.follow_window(win) end)',
+  '    end)',
+  '  end',
+  '  W.follow_window_installed_v2 = ok',
+  'end',
+  '',
   'local function normalize(weights)',
   '  local total = 0',
   '  for i = 1, #weights do total = total + weights[i] end',
@@ -2683,18 +2762,19 @@ var LUA_RUNTIME = [
   '  W.app_rules = {}',
   'end',
   '',
-  '-- `silent` keeps a window that opens while you are elsewhere from dragging',
-  '-- your view to its workspace, which is the whole point of pinning it there.',
+  '-- `silent` keeps placement from changing the active workspace before the',
+  '-- event hook above decides whether this particular launch should be followed.',
   'function W.set_slot(ws, class, slots)',
   '  if not W.slots[ws] then W.slots[ws] = {} end',
   '  W.slots[ws][class] = slots',
   'end',
   '',
-  'function W.set_app(match, pattern, ws)',
+  'function W.set_app(match, pattern, ws, follow)',
   '  W.app_rules[match] = hl.window_rule({',
-  '    name = "omarchy-wsl-pin-" .. match,',
+  '    name = "omarchy-wsl-pin-" .. match .. (follow and "-follow" or "-silent"),',
   '    match = { class = pattern },',
   '    workspace = ws .. " silent",',
+  '    tag = follow and "omarchy-wsl-follow-window" or nil,',
   '  })',
   'end',
   '',
@@ -2829,9 +2909,11 @@ function generateLua(config, liveWorkspaceIds, workspaceMonitors) {
   // last one's rule back off Hyprland.
   lines.push("W.reset_apps()")
   var pins = pinEntries(normalized)
+  var followLaunch = activeProfile(normalized).followLaunch === true
   for (i = 0; i < pins.length; i++) {
     lines.push("W.set_app(" + luaString(pins[i].match) + ", " +
-      luaString(appPattern(pins[i].match)) + ", " + luaString(pins[i].workspace) + ")")
+      luaString(appPattern(pins[i].match)) + ", " + luaString(pins[i].workspace) +
+      ", " + (followLaunch ? "true" : "false") + ")")
     if (pins[i].slots.length === 0) continue
     // The layout callback compares classes literally, so a match it cannot
     // reduce to plain class names keeps its workspace and loses its slots.
