@@ -195,6 +195,7 @@ Panel {
   property bool autostartWanted: false
 
   readonly property bool autostartHere: Model.isAutostart(config, selectedWorkspace)
+  readonly property bool followLaunches: Model.activeProfile(config).followLaunch === true
 
   // Everything the search can find: the apps installed on the machine, plus
   // whatever has a window open. Desktop entries come first so an app the
@@ -695,10 +696,9 @@ Panel {
   }
 
   // Start the workspace, rather than starting apps one at a time: everything
-  // pinned here that is not already on screen, in one press. Hyprland's own
-  // exec takes the workspace as a rule, so each one lands in its place without
-  // the view following it.
-  function launchMissing(workspace, list) {
+  // pinned here that is not already on screen, in one press. A manual press can
+  // follow the first app to its workspace; login furnishing always stays put.
+  function launchMissing(workspace, list, follow) {
     if (list.length === 0) return
 
     var waiting = []
@@ -712,7 +712,7 @@ Panel {
         match: list[i].match, name: list[i].name,
         workspace: workspace, command: command
       })
-      for (var c = 0; c < wanted; c++) sync.launch(command, workspace)
+      for (var c = 0; c < wanted; c++) sync.launch(command, workspace, follow)
     }
     // A second batch joins the first rather than replacing it — a login
     // furnishing two workspaces is two calls — and the baseline stays what was
@@ -725,6 +725,16 @@ Panel {
     }
     pendingLaunches = pendingLaunches.concat(waiting)
     launchWatch.restart()
+  }
+
+  // Whether a manual launch follows the app to its workspace. Kept per profile
+  // beside the pins, so a work profile can follow while another stays quiet.
+  function toggleFollowLaunch() {
+    store.mutate(function(draft) {
+      var target = Model.findProfile(draft, draft.activeProfile)
+      if (!target) return
+      target.followLaunch = !target.followLaunch
+    })
   }
 
   // Whether this workspace furnishes itself at login. Kept on the profile
@@ -748,7 +758,7 @@ Panel {
   // survived into this session are left exactly where they are.
   function furnishSession() {
     var plan = Model.autostartPlan(config, appCatalog, windowsByWorkspace)
-    for (var i = 0; i < plan.length; i++) root.launchMissing(plan[i].workspace, plan[i].apps)
+    for (var i = 0; i < plan.length; i++) root.launchMissing(plan[i].workspace, plan[i].apps, false)
   }
 
   // What actually opened. A pin whose class was a guess from a desktop entry
@@ -1233,7 +1243,8 @@ Panel {
         fallback: source ? source.fallback : "dwindle",
         assignments: source ? JSON.parse(JSON.stringify(source.assignments)) : {},
         pins: source && source.pins ? JSON.parse(JSON.stringify(source.pins)) : {},
-        catches: source && source.catches ? JSON.parse(JSON.stringify(source.catches)) : {}
+        catches: source && source.catches ? JSON.parse(JSON.stringify(source.catches)) : {},
+        followLaunch: source ? source.followLaunch === true : false
       })
       draft.activeProfile = unique
     })
@@ -1635,7 +1646,7 @@ Panel {
       var missing = Model.missingApps(root.config, id, root.appCatalog,
         root.windowsByWorkspace[String(id)])
       if (missing.length === 0) return "nothing to open on workspace " + id
-      root.launchMissing(id, missing)
+      root.launchMissing(id, missing, root.followLaunches)
       var names = []
       for (var i = 0; i < missing.length; i++) {
         names.push(missing[i].count > 1 ? missing[i].name + " \u00d7" + missing[i].count : missing[i].name)
@@ -2392,7 +2403,21 @@ Panel {
                 }
                 return "Open on workspace " + Model.workspaceLabel(root.selectedWorkspace) + ": " + names.join(", ")
               }
-              onClicked: root.launchMissing(String(root.selectedWorkspace), root.missingApps)
+              onClicked: root.launchMissing(String(root.selectedWorkspace), root.missingApps, root.followLaunches)
+            }
+
+            Button {
+              visible: root.pinnedHere.length > 0
+              foreground: root.fg
+              accent: root.accent
+              bordered: true
+              fontSize: Style.font.caption
+              verticalPadding: Style.spacing.xs
+              text: root.followLaunches ? "opening \u2192 follow" : "opening \u2192 stay here"
+              tooltipText: root.followLaunches
+                ? "Manual launches switch to the destination workspace. Click to stay where you are."
+                : "Manual launches open silently on their workspace. Click to follow them."
+              onClicked: root.toggleFollowLaunch()
             }
 
             Button {

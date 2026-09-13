@@ -142,9 +142,10 @@ Item {
   }
 
   // Launching goes through the same one-shot queue: it is the same kind of
-  // work — a payload that acts once and returns nothing.
-  function launch(command, workspaceId) {
-    var lua = Model.launchAppLua(command, workspaceId)
+  // work — a payload that acts once and returns nothing. Manual launches may
+  // follow the new window; login launches always pass false and stay silent.
+  function launch(command, workspaceId, follow) {
+    var lua = Model.launchAppLua(command, workspaceId, follow)
     if (lua === "") return
     pendingGathers = pendingGathers.concat([lua])
     if (!gatherProcess.running) flushGather()

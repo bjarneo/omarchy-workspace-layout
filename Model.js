@@ -1083,7 +1083,8 @@ function normalizeProfile(raw, layouts) {
     monitors: monitors,
     pins: pins,
     catches: normalizeCatches(input.catches, known),
-    autostart: normalizeAutostart(input.autostart)
+    autostart: normalizeAutostart(input.autostart),
+    followLaunch: input.followLaunch === true
   }
 }
 
@@ -1913,15 +1914,16 @@ function matchLaunchedWindows(pending, fresh) {
   return pairs
 }
 
-// Open an app on a particular workspace, whether or not anything is pinned:
-// Hyprland's own exec takes the workspace as a rule, and `silent` keeps the
-// launch from dragging the user's view to it.
-function launchAppLua(command, workspaceId) {
+// Open an app on a particular workspace, whether or not anything is pinned.
+// Manual launches may follow the app to its destination; background and login
+// launches stay silent so they never pull the user away from their work.
+function launchAppLua(command, workspaceId, follow) {
   var target = normalizeWorkspaceKey(workspaceId)
   var cmd = String(command || "").replace(/[\u0000-\u001f\u007f]/g, "").trim()
   if (target === null || cmd.length === 0) return ""
+  var destination = target + (follow === true ? "" : " silent")
   return "hl.exec_cmd(" + luaString(cmd) + ", { workspace = " +
-    luaString(target + " silent") + " })"
+    luaString(destination) + " })"
 }
 
 function uniqueProfileName(config, base) {

@@ -194,7 +194,9 @@ captured workspace 9
 
 Open what the workspace is short of: for every app pinned there, one window per
 place it was given, minus the windows it already has. Apps with no launcher and
-no remembered command are skipped — there is nothing to run.
+no remembered command are skipped — there is nothing to run. The active
+profile's `followLaunch` setting applies here too: with it enabled, the command
+switches to the destination workspace; otherwise it opens there silently.
 
 A `Terminal=true` app (`nvim`, `btop`, a TUI player) is opened in your terminal
 under a window class of the plugin's own, so the pin can place it; the class and

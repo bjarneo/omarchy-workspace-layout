@@ -759,13 +759,40 @@ test("the search reads names as well as classes, and running beats installed", (
   assert.equal(plain.command, "")
 })
 
-test("opening an app puts it on the workspace without following it there", () => {
+test("opening an app can follow it to the destination workspace", () => {
   assert.equal(
     Model.launchAppLua("nautilus", 3),
     'hl.exec_cmd("nautilus", { workspace = "3 silent" })'
   )
-  assert.equal(Model.launchAppLua("", 3), "")
-  assert.equal(Model.launchAppLua("nautilus", "special:x"), "")
+  assert.equal(
+    Model.launchAppLua("nautilus", 3, true),
+    'hl.exec_cmd("nautilus", { workspace = "3" })'
+  )
+  assert.equal(Model.launchAppLua("", 3, true), "")
+  assert.equal(Model.launchAppLua("nautilus", "special:x", true), "")
+})
+
+test("following launched apps is an opt-in profile setting", () => {
+  const quiet = Model.normalizeProfile({ name: "quiet" }, [])
+  const following = Model.normalizeProfile({ name: "following", followLaunch: true }, [])
+  const repaired = Model.normalizeProfile({ name: "repaired", followLaunch: "true" }, [])
+
+  assert.equal(quiet.followLaunch, false)
+  assert.equal(following.followLaunch, true)
+  assert.equal(repaired.followLaunch, false)
+})
+
+test("manual launches follow the profile setting while login launches stay silent", () => {
+  const panel = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  const sync = fs.readFileSync(path.join(__dirname, "..", "HyprlandSync.qml"), "utf8")
+
+  assert.match(panel, /readonly property bool followLaunches: Model\.activeProfile\(config\)\.followLaunch/)
+  assert.match(panel, /target\.followLaunch = !target\.followLaunch/)
+  assert.match(panel, /sync\.launch\(command, workspace, follow\)/)
+  assert.match(panel, /root\.launchMissing\(String\(root\.selectedWorkspace\), root\.missingApps, root\.followLaunches\)/)
+  assert.match(panel, /root\.launchMissing\(plan\[i\]\.workspace, plan\[i\]\.apps, false\)/)
+  assert.match(sync, /function launch\(command, workspaceId, follow\)/)
+  assert.match(sync, /Model\.launchAppLua\(command, workspaceId, follow\)/)
 })
 
 test("a hostile command cannot break out of the launch payload",
@@ -1221,7 +1248,7 @@ test("pinning an app is wired to a click and brings its open windows along", () 
 
   const sync = fs.readFileSync(path.join(__dirname, "..", "HyprlandSync.qml"), "utf8")
   assert.match(sync, /function gather\(match, workspaceId\)/)
-  assert.match(sync, /function launch\(command, workspaceId\)/)
+  assert.match(sync, /function launch\(command, workspaceId, follow\)/)
   // A Terminal=true app needs wrapping before it is a window at all.
   assert.match(qml, /function launchCommandFor\(app\)/)
   assert.match(qml, /terminal: entry\.runInTerminal === true/)
@@ -1233,10 +1260,10 @@ test("pinning an app is wired to a click and brings its open windows along", () 
   // Chromium's entry ships the unexpanded token as its StartupWMClass.
   assert.match(qml, /match\.indexOf\("@@"\) !== -1/)
   // One press starts the workspace rather than one press per app.
-  assert.match(qml, /function launchMissing\(workspace, list\)/)
+  assert.match(qml, /function launchMissing\(workspace, list, follow\)/)
   // One window per place the app was given, not one per app.
   assert.match(qml, /for \(var c = 0; c < wanted; c\+\+\) sync\.launch/)
-  assert.match(qml, /onClicked: root\.launchMissing\(String\(root\.selectedWorkspace\), root\.missingApps\)/)
+  assert.match(qml, /onClicked: root\.launchMissing\(String\(root\.selectedWorkspace\), root\.missingApps, root\.followLaunches\)/)
 })
 
 test("clicking a workspace goes there, because a layout is edited by watching it", () => {
@@ -1298,9 +1325,10 @@ test("catching an app is wired to the same click that pins one", () => {
   assert.match(qml, /catches: source && source\.catches \? JSON\.parse/)
 })
 
-test("a new profile inherits the pins it was copied from", () => {
+test("a new profile inherits the pins and launch behavior it was copied from", () => {
   const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
   assert.match(qml, /pins: source && source\.pins \? JSON\.parse\(JSON\.stringify\(source\.pins\)\) : \{\}/)
+  assert.match(qml, /followLaunch: source \? source\.followLaunch === true : false/)
 })
 
 test("a terminal app is opened in a terminal, under its own class", () => {
