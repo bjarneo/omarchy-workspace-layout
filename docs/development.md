@@ -15,7 +15,8 @@ documentation — read it yourself, or point a tool at it explicitly.
 | `LayoutCanvas.qml` | The drag-to-resize editor. |
 | `LayoutThumb.qml` | Non-interactive miniature, used by the bar icon and the chips. |
 | `ConfigStore.qml` | The JSON document on disk, normalized on every read. |
-| `HyprlandSync.qml` | Config document → live Hyprland, via the generated Lua and `hyprctl eval`. Also the one-shot app gather, which needs its own process: the sync queue is latest-wins and a pin fires both. |
+| `HyprlandSync.qml` | Read live workspaces, apply the latest config, then run queued app actions and workspace swaps. Preview has a separate queue. |
+| `AppPinEditor.qml` | Edit a pin's class, command, name, slots, and tab-group count. |
 | `Panel.qml` | The UI. Owns its own store and sync — see below. |
 | `Service.qml` | Optional background sync for a bar-less install. |
 | `docs/development.md` | This file: how the pieces fit and what will bite you. |
@@ -157,15 +158,43 @@ Established by probing 0.56.2; the Lua stubs are at `/usr/share/hypr/stubs/hl.me
 - `hl.layout.register(name, { recalculate, layout_msg })` — the layout is then
   referenced as `lua:name`. Without the `lua:` prefix, Hyprland silently falls
   back to dwindle.
-- Registering the same name twice raises. This file is re-run on every config
-  reload, so registration is remembered in `_G` for the compositor's lifetime and
-  behaviour updates through `W.specs` instead.
+- Registering the same name twice raises. `_G` preserves registrations between
+  evaluations. A full Hyprland reload recreates the Lua state and registrations.
 - `hl.workspace_rule({ workspace = ..., layout = ... })` updates an existing
   selector in place. Reissuing a rule preserves fields such as `monitor`,
   `persistent`, and `enabled`; do not disable the previous returned handle.
-- Changing a spec does not re-tile anything. `hl.dispatch(hl.dsp.layout(msg))`
-  reaches the *active* workspace's layout only, and raises on a workspace running
-  a built-in — hence the `pcall` in `W.relayout`.
+- A layout spec change needs a recalculation. `W.relayout` checks the active
+  workspace before it sends a layout message. Builtin layouts receive no message.
+  Full sync also refreshes the active plugin layout after a config reload.
+- `hl.dsp.workspace.change_id({ workspace = ws, id = n })` renumbers a workspace
+  object. Its windows, tiling tree, focus, groups and fullscreen state come
+  along, and the monitor's active workspace follows. Onto a number that is
+  taken it **warns and returns success** — check `hl.get_workspace(n)` afterwards
+  rather than trusting the call.
+- Workspace rules are keyed by number and re-apply the moment a workspace
+  arrives at a new one, so a renumbered workspace is re-tiled into whatever its
+  new number's rule says, and a tree that passes through a foreign layout comes
+  back rearranged. `swapWorkspacesLua` therefore gives each destination — the
+  spare number included — the arriving workspace's own `tiled_layout` before
+  moving it. `persistent` follows the number the same way: an empty persistent
+  workspace renumbered away is destroyed and its number comes back empty.
+- `hyprctl eval` prints `ok` and discards any returned value. A Lua
+  `error(msg, 0)` prints `error: msg` and exits 7. Both go to **stdout**; that
+  is the whole reply channel, which is why the swap process reads the exit code
+  and stdout.
+- **Quickshell 0.3.1 does not follow `changeworkspaceid`.** Hyprland announces
+  a renumbering on the event socket and Quickshell has no handler for it, so
+  after a swap `Hyprland.workspaces` still carries the old monitors and
+  `focusedWorkspace` the old number. `refreshWorkspaces()` and
+  `refreshMonitors()` re-read the ids Quickshell already knows, which is why
+  the panel calls both once a swap is confirmed — but they never add a number
+  it has not seen. A swap onto an empty number therefore first makes that
+  workspace exist with a `persistent` rule: its creation, and the empty one's
+  destruction on the vacated number, are ordinary events Quickshell follows.
+- **`hyprctl -j workspaces` names the wrong Lua layout.** With more than one
+  Lua layout registered, its `tiledLayout` field can report another layout's
+  name for a workspace running one of this plugin's. The Lua API's
+  `tiled_layout` and the window geometry are correct; check those.
 - `hl.window_rule({ ... })`'s `name` is a **label**, not the rule. The rule is
   sibling fields on the same table — `workspace = "9 silent"`, `float = true` —
   the way `/usr/share/hypr/hyprland.lua` writes them. A spec of
@@ -228,16 +257,61 @@ Established by probing 0.56.2; the Lua stubs are at `/usr/share/hypr/stubs/hl.me
 - `omarchy-shell shell rescanPlugins` reloads plugin code but does not always
   re-instantiate a live bar widget. Use `omarchy restart shell` when testing
   anything that runs at construction.
-- A `FileView` watching a path that does not exist yet can emit neither
-  `onLoaded` nor `onLoadFailed`, so `ConfigStore` has a fallback timer. Without
-  it, a first run never becomes ready and nothing downstream ever runs.
-- **Omarchy's SUPER+L is a separate writer.** It persists
-  `~/.local/state/omarchy/workspace-layouts/<id>.lua` and applies a workspace
-  rule immediately. This plugin's generated file loads *after* those rules and
-  used to overwrite them with whatever the JSON last said. `OmarchyToggleFollow`
-  reads the directory (inotify + a startup `cat`) and writes Super+L's builtin
-  into the active profile. A live write always wins; the startup scan will not
-  steal a workspace that already has one of this plugin's layouts.
+- A `FileView` can stay silent for a missing path. `ConfigStore` confirms absence
+  twice before it permits a first-run sync. A pending read never authorizes a write.
+- **SUPER+L is a separate writer.** `OmarchyToggleFollow` records each file's
+  inode, timestamps, size, and layout. Only changed files or explicit inotify
+  events count as live toggles. Startup protects custom workspace and monitor
+  layouts. Directory changes and unchanged polls do not repeat old choices.
+
+## Config and operation order
+
+`ready` means a valid document loaded or two probes confirmed a first run.
+Read failures and malformed JSON preserve the last good document. Mutations and
+previews remain disabled before that first decision.
+
+Each config copy carries a fingerprint of its source text. A live sync checks
+the file before it changes Hyprland. This rejects stale copies from another panel.
+The fingerprint detects concurrent changes.
+
+Full sync reads `hyprctl -j workspaces` before it generates Lua. QML's workspace
+cache can retain old monitor mappings after a swap. App actions wait for sync.
+A swap waits for earlier actions, updates the document after success, and then
+requests another full sync. Failed prerequisites release a pending swap.
+
+The generated file changes only when its content changes. This prevents reload
+loops when a user loads it through `require`.
+
+## Named workspace ownership
+
+Named workspaces need an assignment, a monitor default, or `manageNamed: true`.
+The panel sets `manageNamed` for `All workspaces`. The `hyprland` assignment
+releases one named workspace even when a broader default applies.
+
+The runtime records a claimed workspace's previous layout. Release restores that
+layout unless another writer already changes it. Workspace rule fields remain intact.
+Live ids connect name changes within a session. Persistent config keys remain names.
+Name swaps re-key all profiles together. Intermediate duplicate names retain the
+last unambiguous identity map.
+
+## App launches and tab groups
+
+Follow applies to an explicit panel or CLI request once. Every resulting window
+uses silent placement. Login and unrelated launches cannot consume a focus exemption.
+The runtime disables the old follow callback during an upgrade.
+
+`group` is the number of windows to restore, from 1 to 32. It uses one slot.
+Canvas counts use layout targets. Launch counts use individual windows, with
+floating dialogs excluded for group pins. Capture retains group membership metadata.
+
+Hyprland already provides one layout target per group. Keep the geometry engine
+independent of client-list member counts. Group restore uses `HL.Group:add` and
+preserves mixed-class and locked groups. `hl.on` returns a subscription with a
+`remove()` method. Reapply replaces the plugin's group subscriptions.
+
+Terminal classes use a short hash for named workspaces. New launches avoid
+classes retained by existing pins after a rename or swap. Saved commands preserve
+the classes used by older pins.
 
 **Editing a shipped layout forks it.** `Panel.forkPreset` runs inside the same
 `store.stage`/`store.mutate` as the edit, so the copy and the change land in one

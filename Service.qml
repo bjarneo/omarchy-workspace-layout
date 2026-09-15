@@ -48,16 +48,23 @@ Item {
 
   OmarchyToggleFollow {
     config: store.config
-    active: store.ready
+    workspaceMonitors: sync.liveWorkspaceMonitors
+    active: store.ready && sync.workspacesReady
     onFollowed: function(document) { store.save(document) }
   }
 
   HyprlandSync {
     id: sync
     config: store.config
+    active: store.ready
+    sourceToken: store.sourceToken
     workspaceIds: root.workspaceIds
     workspaceMonitors: root.workspaceMonitors
     manageLoader: true
+    onWorkspacesRenamed: function(renames) {
+      var next = Model.renamedWorkspaces(store.config, renames)
+      if (next) store.save(next)
+    }
   }
 
   // Coalesce: a save writes the file, which fires the watcher, which bumps the

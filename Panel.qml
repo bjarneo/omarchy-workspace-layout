@@ -59,6 +59,7 @@ Panel {
 
   readonly property var config: store.config
   readonly property var profile: Model.activeProfile(config)
+  readonly property bool editable: store.ready && !sync.swapping
   readonly property var layouts: config && config.layouts instanceof Array ? config.layouts : []
 
   readonly property bool assigningAll: assignTarget === "all"
@@ -89,7 +90,7 @@ Panel {
       if (monitors && monitors[selectedMonitor]) return monitors[selectedMonitor]
       return profile ? profile.fallback : "dwindle"
     }
-    return Model.layoutIdForWorkspace(config, selectedWorkspace, selectedMonitor)
+    return workspaceLayoutId(selectedWorkspace, selectedMonitor)
   }
   readonly property var selectedLayout: Model.findLayout(config, selectedLayoutId)
 
@@ -127,12 +128,16 @@ Panel {
       var key = String(menuWorkspace)
       var assigned = profile && profile.assignments ? profile.assignments[key] : ""
       var resolved = Model.layoutIdForWorkspace(config, menuWorkspace, workspaceMonitors[key])
-      if (assigned || !Model.isBuiltin(resolved)) {
+      if ((assigned || !Model.isBuiltin(resolved)) && Model.isWorkspaceManaged(config, menuWorkspace, workspaceMonitors[key])) {
         out.push({ key: "handback", label: "Hand back to Hyprland" })
       }
       out.push({ key: "capture", label: "Capture the windows here" })
       var entries = Model.pinsForWorkspace(config, menuWorkspace)
       if (entries.length > 0) out.push({ key: "clearapps", label: "Clear this workspace's apps" })
+      var targets = swapTargets(menuWorkspace)
+      for (var t = 0; t < targets.length; t++) {
+        out.push({ key: "swap:" + targets[t], label: "Swap with workspace " + targets[t] })
+      }
       return out
     }
     if (menuSlot < 1) return out
@@ -180,6 +185,9 @@ Panel {
   // Windows per class per workspace, from the same poll: a pin asking for
   // three terminals is only satisfied once three are actually here.
   property var windowsByWorkspace: ({})
+  property var tiledWindowsByWorkspace: ({})
+  property var requestedLaunches: []
+  property string windowReadError: ""
 
   // Which terminal to wrap a `Terminal=true` app in. Detected once: the user's
   // xdg preference if we know it, otherwise the first one installed.
@@ -195,6 +203,7 @@ Panel {
   property bool autostartWanted: false
 
   readonly property bool autostartHere: Model.isAutostart(config, selectedWorkspace)
+  readonly property bool followLaunches: Model.activeProfile(config).followLaunch === true
 
   // Everything the search can find: the apps installed on the machine, plus
   // whatever has a window open. Desktop entries come first so an app the
@@ -304,11 +313,14 @@ Panel {
     slotApps = labelled
     appRows = Model.searchApps(config, selectedWorkspace, appCatalog, appQuery, 6)
     missingApps = Model.missingApps(config, selectedWorkspace, appCatalog,
-      windowsByWorkspace[String(selectedWorkspace)])
+      windowsByWorkspace[String(selectedWorkspace)], tiledWindowsByWorkspace[String(selectedWorkspace)])
   }
 
   onAppQueryChanged: refreshAppState()
-  onSelectedWorkspaceChanged: refreshAppState()
+  onSelectedWorkspaceChanged: {
+    refreshAppState()
+    if (appEditor) appEditor.opened = false
+  }
   onRunningAppsChanged: {
     rebuildCatalog()
     refreshAppState()
@@ -325,11 +337,20 @@ Panel {
   // focused workspace is running.
   readonly property string focusedWorkspaceKey: Model.workspaceKey(Hyprland.focusedWorkspace || 1)
   readonly property int focusedWorkspaceId: Hyprland.focusedWorkspace ? Hyprland.focusedWorkspace.id : 1
-  readonly property string focusedLayoutId: Model.layoutIdForWorkspace(config, focusedWorkspaceKey,
+  readonly property string focusedLayoutId: workspaceLayoutId(focusedWorkspaceKey,
     workspaceMonitors[focusedWorkspaceKey])
   readonly property var focusedLayout: Model.findLayout(config, focusedLayoutId)
   readonly property string activeProfileName: profile ? profile.name : ""
-  readonly property bool managingFocused: !Model.isBuiltin(focusedLayoutId)
+  onActiveProfileNameChanged: if (appEditor) appEditor.opened = false
+  readonly property bool managingFocused: Model.isWorkspaceManaged(config, focusedWorkspaceKey,
+    workspaceMonitors[focusedWorkspaceKey]) && !Model.isBuiltin(focusedLayoutId)
+
+  function workspaceLayoutId(workspace, monitor) {
+    if (Model.isWorkspaceManaged(config, workspace, monitor)) {
+      return Model.layoutIdForWorkspace(config, workspace, monitor)
+    }
+    return sync.liveWorkspaceLayouts[Model.workspaceKey(workspace)] || "dwindle"
+  }
 
   readonly property real screenAspect: {
     var screen = panel.screen
@@ -386,6 +407,7 @@ Panel {
     selectedSlot = 0
     appQuery = ""
     appSearch.text = ""
+    appEditor.opened = false
     if (opened) {
       if (!workspacePinned) selectedWorkspace = focusedWorkspaceKey
       refreshCounts()
@@ -518,6 +540,52 @@ Panel {
     sync.sync()
   }
 
+  // Two workspaces trade numbers: Hyprland first, then the document, so a
+  // swap the compositor refuses changes nothing on disk. The document half
+  // runs from `onSwapped`, once Hyprland has confirmed. What `swap` on the
+  // command line does. False when a swap is already underway.
+  function swapWorkspaces(from, to) {
+    return sync.swap(from, to)
+  }
+
+  Connections {
+    target: sync
+    function onWorkspacesRenamed(renames) {
+      var next = Model.renamedWorkspaces(root.config, renames)
+      if (next) store.save(next)
+      if (renames[root.selectedWorkspace]) root.selectedWorkspace = renames[root.selectedWorkspace]
+    }
+    function onSwapped(from, to, profile) {
+      var next = Model.swappedWorkspaces(root.config, from, to, profile)
+      if (next) store.save(next)
+      // The selection stays with the workspace it was on, which now has the
+      // other number. With the panel open it would not follow focus by itself.
+      if (selectedWorkspace === from) selectedWorkspace = to
+      else if (selectedWorkspace === to) selectedWorkspace = from
+      // Omarchy's Super+L files are keyed by number too, and would put the
+      // old layouts back on the next press. The next press recreates them.
+      toggles.forget([from, to])
+      // Hyprland announces a renumbering as `changeworkspaceid`, which
+      // Quickshell does not follow, so its view of the two numbers is stale:
+      // the wrong monitors, a focused workspace that no longer exists, and
+      // windows still listed under their old numbers, which is what the bar
+      // reads to grey out an empty workspace. Asking it to re-read all three
+      // brings them up to date, and the monitor change that answers re-syncs
+      // with the right defaults.
+      Hyprland.refreshWorkspaces()
+      Hyprland.refreshMonitors()
+      Hyprland.refreshToplevels()
+      root.refreshAppState()
+      // The Lua parked each workspace's own layout on its new number before
+      // moving it, so this reissues the same rules and re-tiles nothing.
+      sync.sync()
+    }
+    function onSwapFailed(from, to, message) {
+      console.warn("workspace-layout: workspaces " + from + " and " + to +
+        " were not swapped:", message)
+    }
+  }
+
   // The one place a pin is written. Everything a pin remembers that the caller
   // did not mention is carried over — the readable name, and the command that
   // produced its window. Losing the command silently unlaunches the app: no
@@ -536,7 +604,9 @@ Panel {
     var command = changes.command || previous.command || ""
     if (name !== "") pin.name = name
     if (command !== "") pin.command = command
-    target.pins[match] = pin
+    var group = changes.group !== undefined ? changes.group : previous.group
+    if (group > 0) pin.group = group
+    target.pins[match] = Model.normalizePin(pin)
   }
 
   // Pin an app to a workspace and a set of places, without the aiming the
@@ -656,7 +726,8 @@ Panel {
         // place — two terminals can hold the left and right thirds — and
         // clicking a tile it already holds takes that one back.
         var at = next.indexOf(slot)
-        if (at === -1) next.push(slot)
+        if (previous && previous.group) next = at === -1 ? [slot] : []
+        else if (at === -1) next.push(slot)
         else next.splice(at, 1)
       }
       root.writePin(draft, clean, { workspace: workspace, slots: next, name: label || "" })
@@ -680,6 +751,29 @@ Panel {
     sync.sync()
   }
 
+  function editAppPin(match) {
+    var pin = profile && profile.pins ? profile.pins[match] : null
+    appEditor.edit(match, pin, pin ? pin.workspace : selectedWorkspace, selectedSlot)
+    Qt.callLater(function() {
+      if (appEditor.opened) scroller.contentItem.contentY = Math.max(0,
+        Math.min(appEditor.y, content.implicitHeight - scroller.height))
+    })
+  }
+
+  function saveAppPin(original, match, workspace, slots, command, name, group) {
+    if (!editable) return false
+    var previous = Model.activeProfile(config).pins[original]
+    var wasGrouped = previous && previous.group > 0
+    var next = Model.editedPin(config, original, match, workspace, slots, command, name, group)
+    if (!next || !store.save(next)) return false
+    appEditor.opened = false
+    refreshAppState()
+    sync.sync()
+    sync.gather(match, workspace)
+    if (wasGrouped && Number(group) === 0) sync.ungroup(match, workspace)
+    return true
+  }
+
   // What actually gets run for an app. A `Terminal=true` entry is a command,
   // not a window: it needs a terminal wrapped around it, and that terminal has
   // to be told to call its window by the class the pin was written against, or
@@ -691,17 +785,17 @@ Panel {
     // window that appears — along with this command, which is the only record
     // of how such a window is made.
     return Model.terminalLaunch(terminalId,
-      Model.terminalClassFor(app.match, app.workspace), app.command)
+      Model.terminalClassFor(app.match, app.workspace, config), app.command)
   }
 
   // Start the workspace, rather than starting apps one at a time: everything
-  // pinned here that is not already on screen, in one press. Hyprland's own
-  // exec takes the workspace as a rule, so each one lands in its place without
-  // the view following it.
-  function launchMissing(workspace, list) {
-    if (list.length === 0) return
+  // pinned here that is not already on screen, in one press. A manual press can
+  // follow the first app to its workspace; login furnishing always stays put.
+  function launchMissing(workspace, list, follow) {
+    if (!editable || list.length === 0) return
 
     var waiting = []
+    var followNext = follow === true
     for (var i = 0; i < list.length; i++) {
       // One window per place the app was given: an app pinned to three slots
       // wants three windows, and one press should furnish the workspace.
@@ -712,7 +806,10 @@ Panel {
         match: list[i].match, name: list[i].name,
         workspace: workspace, command: command
       })
-      for (var c = 0; c < wanted; c++) sync.launch(command, workspace)
+      for (var c = 0; c < wanted; c++) {
+        sync.launch(command, workspace, followNext)
+        followNext = false
+      }
     }
     // A second batch joins the first rather than replacing it — a login
     // furnishing two workspaces is two calls — and the baseline stays what was
@@ -725,6 +822,39 @@ Panel {
     }
     pendingLaunches = pendingLaunches.concat(waiting)
     launchWatch.restart()
+  }
+
+  function requestLaunch(workspace, follow) {
+    if (!editable) return
+    for (var i = 0; i < requestedLaunches.length; i++) {
+      if (requestedLaunches[i].workspace === workspace) return
+    }
+    requestedLaunches = requestedLaunches.concat([{ workspace: workspace, follow: follow,
+      profile: activeProfileName }])
+    refreshCounts()
+  }
+
+  function launchRequested() {
+    if (!editable) return
+    var requests = requestedLaunches
+    requestedLaunches = []
+    for (var i = 0; i < requests.length; i++) {
+      var request = requests[i]
+      if (request.profile !== activeProfileName) continue
+      var missing = Model.missingApps(config, request.workspace, appCatalog,
+        windowsByWorkspace[request.workspace], tiledWindowsByWorkspace[request.workspace])
+      launchMissing(request.workspace, missing, request.follow)
+    }
+  }
+
+  // Whether a manual launch follows the app to its workspace. Kept per profile
+  // beside the pins, so a work profile can follow while another stays quiet.
+  function toggleFollowLaunch() {
+    store.mutate(function(draft) {
+      var target = Model.findProfile(draft, draft.activeProfile)
+      if (!target) return
+      target.followLaunch = !target.followLaunch
+    })
   }
 
   // Whether this workspace furnishes itself at login. Kept on the profile
@@ -747,8 +877,8 @@ Panel {
   // Every marked workspace, each opening only what it is short of. Apps that
   // survived into this session are left exactly where they are.
   function furnishSession() {
-    var plan = Model.autostartPlan(config, appCatalog, windowsByWorkspace)
-    for (var i = 0; i < plan.length; i++) root.launchMissing(plan[i].workspace, plan[i].apps)
+    var plan = Model.autostartPlan(config, appCatalog, windowsByWorkspace, tiledWindowsByWorkspace)
+    for (var i = 0; i < plan.length; i++) root.launchMissing(plan[i].workspace, plan[i].apps, false)
   }
 
   // What actually opened. A pin whose class was a guess from a desktop entry
@@ -811,7 +941,8 @@ Panel {
         workspace: pin.workspace,
         slots: pin.slots,
         name: pin.name || from,
-        command: command || pin.command || ""
+        command: command || pin.command || "",
+        group: pin.group || 0
       }
       delete target.pins[from]
       root.writePin(draft, to, next)
@@ -861,6 +992,18 @@ Panel {
     if (key === "handback") resetWorkspace(workspace)
     else if (key === "capture") captureWorkspace(workspace)
     else if (key === "clearapps") clearWorkspaceApps(workspace)
+    else if (key.indexOf("swap:") === 0) swapWorkspaces(workspace, key.slice(5))
+  }
+
+  // The workspaces this one could trade numbers with from the menu: every
+  // numbered workspace in the strip, empty ones included, in the strip's
+  // order. Nothing is offered while a swap is underway.
+  function swapTargets(workspace) {
+    var self = Model.normalizeWorkspaceId(workspace)
+    if (self === null || sync.swapping) return []
+    return workspaceRow.filter(function(id) {
+      return Model.normalizeWorkspaceId(id) !== null && id !== self
+    })
   }
 
   // One workspace back to Hyprland's own tiling, without touching the rest:
@@ -871,7 +1014,7 @@ Panel {
     store.mutate(function(draft) {
       var target = Model.findProfile(draft, draft.activeProfile)
       if (!target) return
-      target.assignments[key] = "dwindle"
+      target.assignments[key] = key.indexOf("name:") === 0 ? "hyprland" : "dwindle"
       if (target.pins) {
         for (var match in target.pins) {
           if (target.pins[match].workspace === key) delete target.pins[match]
@@ -925,7 +1068,8 @@ Panel {
       // Keep whatever a learned pin was carrying: its name, and the command
       // that is the only record of how to open it.
       for (var match in shot.pins) {
-        root.writePin(draft, match, { workspace: key, slots: shot.pins[match] })
+        root.writePin(draft, match, { workspace: key, slots: shot.pins[match],
+          group: shot.groups && shot.groups[match] ? shot.groups[match] : 0 })
       }
     })
     if (String(selectedWorkspace) === key) assignTarget = "workspace"
@@ -1178,6 +1322,7 @@ Panel {
     if (!target) return
     if (root.assigningAll) {
       target.fallback = id
+      target.manageNamed = true
       target.assignments = {}
       target.monitors = {}
       return
@@ -1228,13 +1373,9 @@ Panel {
     var unique = Model.uniqueProfileName(config, clean)
     store.mutate(function(draft) {
       var source = Model.findProfile(draft, draft.activeProfile)
-      draft.profiles.push({
-        name: unique,
-        fallback: source ? source.fallback : "dwindle",
-        assignments: source ? JSON.parse(JSON.stringify(source.assignments)) : {},
-        pins: source && source.pins ? JSON.parse(JSON.stringify(source.pins)) : {},
-        catches: source && source.catches ? JSON.parse(JSON.stringify(source.catches)) : {}
-      })
+      var copy = source ? JSON.parse(JSON.stringify(source)) : Model.normalizeProfile({}, draft.layouts)
+      copy.name = unique
+      draft.profiles.push(copy)
       draft.activeProfile = unique
     })
     creatingProfile = false
@@ -1294,52 +1435,32 @@ Panel {
       onStreamFinished: {
         try {
           var clients = JSON.parse(text)
-          var counts = {}
-          var apps = {}
-          // How many windows of each class each workspace holds, which is what
-          // says whether a pin asking for three of something has them.
-          var here = {}
-          for (var i = 0; i < clients.length; i++) {
-            var client = clients[i]
-            if (client.mapped === false) continue
-            // Floating windows are pinnable even though they never occupy a
-            // slot, so the app list is gathered before the tiling filter.
-            var appClass = String(client.class || "").trim()
-            var where = Model.workspaceKey(client.workspace || 0)
-            if (where === null) continue
-            if (appClass.length > 0) {
-              apps[appClass] = true
-              if (!here[where]) here[where] = ({})
-              here[where][appClass] = (here[where][appClass] || 0) + 1
-            }
-            // The layout only ever sees tiled, mapped windows, so anything else
-            // would make the canvas claim slots that are not really filled.
-            if (client.floating) continue
-            var key = Model.workspaceKey(client.workspace || 0)
-            counts[key] = (counts[key] || 0) + 1
-          }
-          root.tiledCounts = counts
-          root.windowsByWorkspace = here
+          if (!(clients instanceof Array)) throw new Error("Invalid window reply")
+          var state = Model.clientSnapshot(clients)
+          root.tiledCounts = state.counts
+          root.windowsByWorkspace = state.windows
+          root.tiledWindowsByWorkspace = state.tiledWindows
+          root.windowReadError = ""
           // Assigned only when the set actually changed: this runs every 700ms
           // while the panel is open, and a fresh array each time would rebuild
           // the catalogue and every row in the Apps section with it.
-          var list = Object.keys(apps).sort()
+          var list = state.apps
           if (list.join("\u0000") !== root.runningApps.join("\u0000")) root.runningApps = list
           root.adoptLaunched(list)
           // The login furnishing waits for this: it is the first and only read
           // of what is already open.
-          if (root.autostartWanted) {
+          if (root.autostartWanted && root.editable && sync.applied) {
             root.autostartWanted = false
             root.furnishSession()
           }
+          root.launchRequested()
           // Opening or closing a window changes what the workspace is short
           // of. Never while a divider is moving: rebuilding the rows under a
           // drag is what made dragging feel broken. It refreshes the rows and
           // nothing else — a window opening is not an edit to the layout.
           if (!canvas.dragging) root.refreshAppState()
         } catch (error) {
-          root.tiledCounts = ({})
-          root.runningApps = []
+          root.windowReadError = "Cannot read Hyprland windows. Retry the launch."
         }
       }
     }
@@ -1348,7 +1469,7 @@ Panel {
   Timer {
     // Keeps running past a close while a launch is still being waited on: the
     // app the user just asked for may take a few seconds to show a window.
-    running: root.opened || root.pendingLaunches.length > 0
+    running: root.opened || root.pendingLaunches.length > 0 || root.requestedLaunches.length > 0 || root.autostartWanted
     interval: 700
     repeat: true
     onTriggered: root.refreshCounts()
@@ -1383,18 +1504,7 @@ Panel {
         if (workspace === "") return
         try {
           var clients = JSON.parse(text)
-          var windows = []
-          for (var i = 0; i < clients.length; i++) {
-            var client = clients[i]
-            if (!client || client.mapped === false || client.floating) continue
-            if (!client.workspace || Model.workspaceKey(client.workspace) !== workspace) continue
-            windows.push({
-              class: client.class,
-              x: client.at[0], y: client.at[1],
-              w: client.size[0], h: client.size[1]
-            })
-          }
-          root.applyCapture(Model.captureLayout(windows), workspace)
+          root.applyCapture(Model.captureClients(clients, workspace), workspace)
         } catch (error) {
           // A workspace with nothing tiled on it has nothing to capture.
         }
@@ -1409,7 +1519,7 @@ Panel {
     id: autostartArm
     interval: 2500
     repeat: false
-    running: !root.autostartDone && store.ready && !terminalProbe.running
+    running: !root.autostartDone && store.ready && sync.applied && !sync.swapping && !terminalProbe.running
       && root.appCatalog.length > 0
     onTriggered: autostartClaim.running = true
   }
@@ -1451,14 +1561,18 @@ Panel {
   }
 
   OmarchyToggleFollow {
+    id: toggles
     config: store.config
-    active: store.ready
+    workspaceMonitors: sync.liveWorkspaceMonitors
+    active: store.ready && sync.workspacesReady && !sync.swapping
     onFollowed: function(document) { store.save(document) }
   }
 
   HyprlandSync {
     id: sync
     config: store.config
+    active: store.ready
+    sourceToken: store.sourceToken
     workspaceIds: root.workspaceRow
     workspaceMonitors: root.workspaceMonitors
     manageLoader: true
@@ -1556,6 +1670,7 @@ Panel {
     }
 
     function apply(name: string): string {
+      if (!root.editable) return store.lastError || "Wait for the layout update, then retry"
       if (!Model.findProfile(root.config, name)) return "no profile called " + name
       root.selectProfile(name)
       return "profile " + name
@@ -1573,6 +1688,7 @@ Panel {
     }
 
     function set(workspace: string, layout: string): string {
+      if (!root.editable) return store.lastError || "Wait for the layout update, then retry"
       var id = Model.workspaceKey(workspace)
       if (id === null) return "workspace " + workspace + " is out of range"
       if (!Model.findLayout(root.config, layout) && !Model.isBuiltin(layout)) {
@@ -1583,13 +1699,29 @@ Panel {
     }
 
     function reset(workspace: string): string {
+      if (!root.editable) return store.lastError || "Wait for the layout update, then retry"
       var id = Model.workspaceKey(workspace)
       if (id === null) return "workspace " + workspace + " is out of range"
       root.resetWorkspace(id)
       return "workspace " + id + " handed back to Hyprland"
     }
 
+    // Two workspaces trade numbers, windows and all. Answers once Hyprland has
+    // been asked, the way `set` and `apply` do; the document follows when the
+    // compositor confirms, and a swap it refuses is logged, not applied.
+    function swap(a: string, b: string): string {
+      if (!store.ready) return store.lastError || "The layout config is not ready"
+      var from = Model.normalizeWorkspaceId(a)
+      var to = Model.normalizeWorkspaceId(b)
+      if (from === null) return "workspace " + a + " is not a number from 1 to 99"
+      if (to === null) return "workspace " + b + " is not a number from 1 to 99"
+      if (from === to) return "nothing to swap: both are workspace " + from
+      if (!root.swapWorkspaces(from, to)) return "a swap is already underway"
+      return "swapping workspace " + from + " and workspace " + to
+    }
+
     function pin(app: string, workspace: string, slots: string): string {
+      if (!root.editable) return store.lastError || "Wait for the layout update, then retry"
       var match = Model.normalizeAppMatch(app)
       var id = Model.workspaceKey(workspace)
       if (match === null) return "no app given"
@@ -1600,7 +1732,22 @@ Panel {
         (places.length > 0 ? " in slot " + places.join(",") : "")
     }
 
+    function pincommand(app: string, workspace: string, slots: string, command: string): string {
+      if (!root.editable) return store.lastError || "Wait for the layout update, then retry"
+      var match = Model.normalizeAppMatch(app)
+      var id = Model.workspaceKey(workspace)
+      if (id === null) return "workspace " + workspace + " is out of range"
+      var error = Model.pinEditorError(root.config, match, app, command, slots, 0)
+      if (error !== "") return error
+      var previous = Model.activeProfile(root.config).pins[match] || {}
+      if (!root.saveAppPin(match, match, id, slots, command, previous.name || "", previous.group || 0)) {
+        return "Cannot save the app pin"
+      }
+      return match + " opens on workspace " + id + " with the saved command"
+    }
+
     function unpin(app: string): string {
+      if (!root.editable) return store.lastError || "Wait for the layout update, then retry"
       var match = Model.normalizeAppMatch(app)
       if (match === null) return "no app given"
       root.unpinApp(match)
@@ -1611,6 +1758,7 @@ Panel {
     // than reading whichever one the panel happens to be showing. No slots
     // releases the app: a catch with no places is not a rule.
     function catchapp(layout: string, app: string, slots: string): string {
+      if (!root.editable) return store.lastError || "Wait for the layout update, then retry"
       var match = Model.normalizeAppMatch(app)
       if (match === null) return "no app given"
       var target = Model.findLayout(root.config, layout)
@@ -1623,6 +1771,7 @@ Panel {
     }
 
     function capture(workspace: string): string {
+      if (!root.editable) return store.lastError || "Wait for the layout update, then retry"
       var id = Model.workspaceKey(workspace)
       if (id === null) return "workspace " + workspace + " is out of range"
       root.captureWorkspace(id)
@@ -1630,17 +1779,26 @@ Panel {
     }
 
     function launch(workspace: string): string {
+      if (!root.editable) return store.lastError || "Wait for the layout update, then retry"
       var id = Model.workspaceKey(workspace)
       if (id === null) return "workspace " + workspace + " is out of range"
-      var missing = Model.missingApps(root.config, id, root.appCatalog,
-        root.windowsByWorkspace[String(id)])
-      if (missing.length === 0) return "nothing to open on workspace " + id
-      root.launchMissing(id, missing)
-      var names = []
-      for (var i = 0; i < missing.length; i++) {
-        names.push(missing[i].count > 1 ? missing[i].name + " \u00d7" + missing[i].count : missing[i].name)
+      root.requestLaunch(id, root.followLaunches)
+      return "start requested for workspace " + id
+    }
+
+    function group(app: string, workspace: string, count: string): string {
+      if (!root.editable) return store.lastError || "Wait for the layout update, then retry"
+      var match = Model.normalizeAppMatch(app)
+      var id = Model.workspaceKey(workspace)
+      if (id === null) return "workspace " + workspace + " is out of range"
+      var pin = Model.activeProfile(root.config).pins[match] || { slots: [] }
+      var error = Model.pinEditorError(root.config, match, app, pin.command || "", pin.slots.join(","), count)
+      if (error !== "") return error
+      if (!root.saveAppPin(match, match, id, pin.slots.join(","), pin.command || "", pin.name || "", count)) {
+        return "Cannot save the app pin"
       }
-      return "opening " + names.join(", ") + " on workspace " + id
+      if (Number(count) === 0 && !pin.group) sync.ungroup(match, id)
+      return match + (Number(count) > 0 ? " restores " + count + " windows as tabs" : " uses separate windows")
     }
   }
 
@@ -1667,7 +1825,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: profileInput.activeFocus || nameInput.activeFocus || appSearch.activeFocus
+      blocked: profileInput.activeFocus || nameInput.activeFocus || appSearch.activeFocus || appEditor.editing
 
       // Escape and Tab only. The panel is a drawing you point at: single-key
       // shortcuts for the same edits were a second, invisible interface that
@@ -1675,6 +1833,7 @@ Panel {
       // layer-shell surface reliably anyway.
       onCloseRequested: {
         if (root.menuOpen) root.closeSlotMenu()
+        else if (appEditor.opened) appEditor.close()
         else if (root.selectedSlot > 0) root.selectedSlot = 0
         else if (root.armedDelete !== "") root.armedDelete = ""
         else if (root.creatingProfile) root.creatingProfile = false
@@ -1704,63 +1863,70 @@ Panel {
         // otherwise hang off it.
         x: Math.max(0, Math.min(root.menuX, parent.width - width))
         y: Math.max(0, Math.min(root.menuY, parent.height - height))
-        width: Style.space(160)
-        height: menuColumn.implicitHeight + Style.spacing.xs * 2
+        width: Math.min(parent.width, Style.space(220))
+        height: Math.min(parent.height, menuColumn.implicitHeight + Style.spacing.xs * 2)
         radius: Style.cornerRadius
         color: Color.popups.background
         border.width: 1
         border.color: Util.alpha(root.fg, 0.25)
 
-        Column {
-          id: menuColumn
-          anchors.left: parent.left
-          anchors.right: parent.right
-          anchors.top: parent.top
-          anchors.topMargin: Style.spacing.xs
+        Flickable {
+          anchors.fill: parent
+          anchors.margins: Style.spacing.xs
+          contentWidth: width
+          contentHeight: menuColumn.implicitHeight
+          flickableDirection: Flickable.VerticalFlick
+          boundsBehavior: Flickable.StopAtBounds
+          clip: true
 
-          Text {
+          Column {
+            id: menuColumn
             width: parent.width
-            visible: root.menuItems.length === 0
-            horizontalAlignment: Text.AlignHCenter
-            textFormat: Text.PlainText
-            text: "Nothing to do here"
-            color: Util.alpha(root.fg, 0.5)
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-          }
 
-          Repeater {
-            model: root.menuItems.length
-
-            Rectangle {
-              id: menuRow
-              required property int index
-
-              readonly property var modelData: root.menuItems[menuRow.index]
-
+            Text {
               width: parent.width
-              height: Style.space(26)
-              color: menuHover.hovered ? Util.alpha(root.accent, 0.18) : "transparent"
+              visible: root.menuItems.length === 0
+              horizontalAlignment: Text.AlignHCenter
+              textFormat: Text.PlainText
+              text: "Nothing to do here"
+              color: Util.alpha(root.fg, 0.5)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
 
-              Text {
-                anchors.left: parent.left
-                anchors.leftMargin: Style.spacing.sm
-                anchors.verticalCenter: parent.verticalCenter
-                textFormat: Text.PlainText
-                text: menuRow.modelData.label
-                color: root.fg
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
-              }
+            Repeater {
+              model: root.menuItems.length
 
-              HoverHandler { id: menuHover }
+              Rectangle {
+                id: menuRow
+                required property int index
 
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.menuWorkspace !== ""
-                  ? root.runWorkspaceMenu(menuRow.modelData.key)
-                  : root.runSlotMenu(menuRow.modelData.key)
+                readonly property var modelData: root.menuItems[menuRow.index]
+
+                width: parent.width
+                height: Style.space(26)
+                color: menuHover.hovered ? Util.alpha(root.accent, 0.18) : "transparent"
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.spacing.sm
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: menuRow.modelData.label
+                  color: root.fg
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                HoverHandler { id: menuHover }
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.menuWorkspace !== ""
+                    ? root.runWorkspaceMenu(menuRow.modelData.key)
+                    : root.runSlotMenu(menuRow.modelData.key)
+                }
               }
             }
           }
@@ -1785,6 +1951,7 @@ Panel {
 
         Column {
           id: content
+          enabled: root.editable
           width: scroller.availableWidth
           spacing: Style.spacing.xxl
 
@@ -1819,6 +1986,20 @@ Panel {
 
           // --------------------------------------------------- workspaces
 
+          Text {
+            width: parent.width
+            readonly property string message: !store.ready
+              ? (store.lastError || "The plugin reads the layout config.")
+              : (sync.swapping ? "Wait for the workspace swap." : (store.lastError || sync.lastError || root.windowReadError))
+            visible: message !== ""
+            text: message
+            textFormat: Text.PlainText
+            color: !store.ready && store.lastError === "" || sync.swapping ? root.fg : Color.urgent
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WrapAnywhere
+          }
+
           Flow {
             width: parent.width
             spacing: Style.spacing.xs
@@ -1832,7 +2013,7 @@ Panel {
 
                 readonly property bool selected: modelData === root.selectedWorkspace
                 readonly property bool focused: modelData === root.focusedWorkspaceKey
-                readonly property string layoutId: Model.layoutIdForWorkspace(root.config, modelData,
+                readonly property string layoutId: root.workspaceLayoutId(modelData,
                   root.workspaceMonitors[String(modelData)])
                 readonly property var layout: Model.findLayout(root.config, layoutId)
                 readonly property int windows: {
@@ -2252,6 +2433,28 @@ Panel {
             }
           }
 
+          Button {
+            text: "Add app command"
+            foreground: root.fg
+            accent: root.accent
+            bordered: true
+            fontSize: Style.font.caption
+            verticalPadding: Style.spacing.xs
+            onClicked: root.editAppPin("")
+          }
+
+          AppPinEditor {
+            id: appEditor
+            width: parent.width
+            config: root.config
+            foreground: root.fg
+            accent: root.accent
+            onSaved: function(original, match, workspace, slots, command, name, group) {
+              root.saveAppPin(original, match, workspace, slots, command, name, group)
+            }
+            onCancelled: keyCatcher.forceActiveFocus()
+          }
+
           Column {
             width: parent.width
             spacing: Style.spacing.xxs
@@ -2313,6 +2516,8 @@ Panel {
                     textFormat: Text.PlainText
                     text: {
                       if (appRow.modelData.pinned) {
+                        var pin = root.profile.pins[appRow.modelData.match]
+                        if (pin && pin.group) return pin.group + (pin.group === 1 ? " tab" : " tabs")
                         var slots = appRow.modelData.slots
                         if (slots.length === 0) return "any slot"
                         return (slots.length === 1 ? "slot " : "slots ") + slots.join(", ")
@@ -2324,6 +2529,17 @@ Panel {
                     color: Util.alpha(root.fg, 0.5)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
+                  }
+
+                  Button {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: appRow.modelData.pinned
+                    text: "Edit"
+                    foreground: root.fg
+                    accent: root.accent
+                    fontSize: Style.font.caption
+                    verticalPadding: 0
+                    onClicked: root.editAppPin(appRow.modelData.match)
                   }
 
                   // Releasing is its own target rather than a second meaning for
@@ -2392,7 +2608,21 @@ Panel {
                 }
                 return "Open on workspace " + Model.workspaceLabel(root.selectedWorkspace) + ": " + names.join(", ")
               }
-              onClicked: root.launchMissing(String(root.selectedWorkspace), root.missingApps)
+              onClicked: root.requestLaunch(String(root.selectedWorkspace), root.followLaunches)
+            }
+
+            Button {
+              visible: root.pinnedHere.length > 0
+              foreground: root.fg
+              accent: root.accent
+              bordered: true
+              fontSize: Style.font.caption
+              verticalPadding: Style.spacing.xs
+              text: root.followLaunches ? "opening \u2192 follow" : "opening \u2192 stay here"
+              tooltipText: root.followLaunches
+                ? "Manual launches switch to the destination workspace. Click to stay where you are."
+                : "Manual launches open silently on their workspace. Click to follow them."
+              onClicked: root.toggleFollowLaunch()
             }
 
             Button {

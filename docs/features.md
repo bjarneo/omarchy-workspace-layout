@@ -1,5 +1,16 @@
 # Features
 
+## Version 1.3
+
+- Swap numbered workspaces with their windows, layouts, pins, and login marks.
+- Follow explicit panel and CLI launch requests once.
+- Edit custom app classes and launch commands in the panel.
+- Restore same-class tab groups and capture each group as one place.
+- Preserve named workspace ownership and follow workspace renames across profiles.
+- Preserve the last good config during delayed reads and read errors.
+- Follow changed Super+L files without replaying unrelated workspace choices.
+- Refresh the active plugin layout after a Hyprland reload.
+
 Everything the plugin does, in one list.
 
 - Use numeric or named workspaces for layouts, app pins, and startup entries
@@ -44,8 +55,9 @@ Everything the plugin does, in one list.
 - Hover a tile for two arrows that split it either way
 - Right-click a tile to split, merge, remove, even out, clear its apps, or put
   an app in it
-- Right-click a workspace to hand it back to Hyprland, capture it, or clear its
-  apps
+- Right-click a workspace to hand it back to Hyprland, capture it, clear its
+  apps, or swap it with another workspace — windows, tiling, layout, pins and
+  the at-login mark all go with their workspace
 - App names are drawn inside the tiles they live in
 - The tile you are carrying follows the cursor with its name and target
 - The bar icon is a live miniature of the layout the focused workspace is

@@ -24,6 +24,7 @@ one and it stacks where you said extras should go.
 | --- | --- |
 | Omarchy (Quattro plugin runtime) | the bar widget and panel are Quickshell QML loaded by `omarchy-shell` |
 | Hyprland 0.55 or newer | `hl.layout.register`, the Lua layout API the whole plugin is built on |
+| Hyprland 0.56 or newer | workspace swaps and tab-group restoration |
 | `hyprctl` | on `PATH`; how layouts and workspace rules are applied |
 
 No other runtime, package, background service, network access, or privileged
@@ -63,8 +64,10 @@ else in it is pointed at rather than typed.
 **Workspace strip.** Every workspace with the shape it is running. Click one and
 you go there: the windows move under the cursor as you drag, which is worth
 something only if you are looking at them. Right-click one for what to do with
-the workspace itself — hand it back to Hyprland, capture the windows on it, or
-release the apps pinned to it.
+the workspace itself — hand it back to Hyprland, capture the windows on it,
+release the apps pinned to it, or swap it with another workspace. A swap trades
+the two numbers: windows, tiling, layout, pins and the `at login` mark all stay
+with their workspace, and swapping the same two again puts them back.
 
 **Named workspaces.** A workspace does not have to have a number. Plugins that
 give each monitor its own set — [omarchy-per-monitor-workspaces][pmw], say —
@@ -86,6 +89,13 @@ omarchy-shell workspace-layout set name:code golden
 
 `workspace-layout json` lists the named workspaces on screen if you are not sure
 what yours are called.
+
+Named workspaces stay with Hyprland until you assign a layout, choose a monitor
+default, or select `All workspaces`. This prevents an unused profile fallback
+from replacing another plugin's layout. Assignments, pins, and login marks follow
+workspace renames across all profiles.
+`reset` releases a named workspace to its previous Hyprland layout. Its assignment
+uses `"hyprland"` to override a monitor or global claim.
 
 [pmw]: https://github.com/mmsbrggr/omarchy-per-monitor-workspaces
 
@@ -215,6 +225,41 @@ that has no window yet — press it after a reboot and the workspace furnishes
 itself, each app landing in the slot you gave it. Apps already running are left
 alone, and so is anything the machine has no launcher for.
 
+By default, pinned apps open without a workspace change. `opening → follow`
+switches to the destination once when you start a workspace from the panel or CLI.
+The setting belongs to the active profile. Login launches and apps opened through
+other launchers stay silent. A slow window does not reverse a later workspace change.
+
+**Custom app commands and browser profiles.** Select `Add app command` to enter
+a window class, launch command, display name, and slots. Select `Edit` beside a
+pin to change these fields.
+
+Use a distinct class and user-data directory for each Chromium-based browser profile.
+A shared browser process can ignore a new class flag.
+
+```sh
+omarchy-shell workspace-layout pincommand chromium-work 2 1 \
+  'chromium --user-data-dir="$HOME/.local/share/chromium-work" --class=chromium-work'
+omarchy-shell workspace-layout pincommand chromium-personal 5 1 \
+  'chromium --user-data-dir="$HOME/.local/share/chromium-personal" --class=chromium-personal'
+```
+
+**Restore tabs in one place.** Set `Windows to restore in one tab group` in the
+app editor, or use the CLI:
+
+```sh
+omarchy-shell workspace-layout group chromium-work 2 4
+omarchy-shell workspace-layout launch 2
+```
+
+The pin restores four windows and groups matching tiled windows into one place.
+Capture records an existing same-class group as one place with its member count.
+The canvas counts groups once. Login opens only the missing members.
+
+A group uses the first slot on its pin. The restore count supports 1 to 32 windows.
+Zero disables tab restoration. Automatic restoration preserves mixed-class and locked groups.
+Capture preserves mixed groups as one place but does not restore their tab membership.
+
 **Or have it press itself.** Beside that button, `at login → open these` marks
 the workspace as one that starts on its own: a few seconds into the session the
 plugin makes exactly the press you would have made, for every workspace marked
@@ -323,8 +368,8 @@ omarchy-shell workspace-layout apply focus
 ```
 
 `status`, `workspace`, `json`, `profiles`, `layouts`, `apply`, `set`, `reset`,
-`pin`, `unpin`, `catchapp`, `capture`, `launch`, and the panel's own `toggle` /
-`open` / `close`. `catchapp` takes a layout, an app and its places; no places
+`swap`, `pin`, `pincommand`, `group`, `unpin`, `catchapp`, `capture`, `launch`, and the panel's own
+`toggle` / `open` / `close`. `catchapp` takes a layout, an app and its places; no places
 releases it. Every command, what it prints, and a worked example are in
 [docs/cli.md](docs/cli.md).
 
@@ -357,8 +402,11 @@ off centre. A part that is cut again — back along the grain — says so:
 
 a column beside another that is split into a top half and a bottom half, the
 bottom half divided into two. Three levels is the whole model; there is no
-fourth. A profile's `monitors` maps a monitor name to a layout, and its `autostart`
+fourth. A profile's `monitors` maps a monitor name to a layout. Its `autostart`
 lists the workspaces that open their pinned apps at login.
+`"followLaunch": true` makes panel and CLI launch requests switch to their destination.
+`"manageNamed": true` applies the profile fallback to named workspaces. The panel
+sets this field when you choose `All workspaces`.
 
 An app pin is one line in that JSON: `"firefox": "3"` sends it to workspace 3,
 `"firefox": { "workspace": "3", "slot": 2 }` sends it to the second slot of
@@ -373,6 +421,22 @@ terminal app is remembered:
   "command": "ghostty --gtk-single-instance=false --class=omarchy.wsl.nvim -e nvim"
 }
 ```
+
+`"group": 4` restores four windows as tabs in the pin's first slot:
+
+```json
+"chromium-work": {
+  "workspace": "2", "slots": [1], "group": 4,
+  "command": "chromium --user-data-dir=\"$HOME/.local/share/chromium-work\" --class=chromium-work"
+}
+```
+
+The plugin waits for a valid config read or a confirmed first run before sync.
+Read errors preserve the last good document. A full sync reads the current monitor
+map and rejects a config copy that no longer matches the file on disk.
+
+After a Hyprland reload, the plugin reapplies the config and refreshes its active
+layout. This also refreshes geometry after the gaps toggle.
 
 The JSON is the source of truth and safe to keep in dotfiles. A hand-edit applies
 within a second. Anything malformed is repaired rather than refused, so you
@@ -399,14 +463,20 @@ checks the file exists first, so leaving it does no harm. Workspaces return to
   interface has no resize hook, so `SUPER` + right-drag does nothing inside these
   layouts. Drag the panel's dividers, or use `[` and `]`. Ratios set that way are
   named and saved, which the mouse gesture never was.
+- **A swap is numbers only.** Swapping trades workspace numbers 1 to 99 and
+  needs Hyprland 0.56 for its `change_id` dispatcher; named workspaces cannot be
+  swapped. A `persistent` rule stays with the number rather than the workspace,
+  which is how Hyprland treats it. Omarchy's own Super+L files for the two
+  numbers are removed, since they would put the old layouts back; the next
+  press recreates them.
 - **Special workspaces are left alone.** `special:scratchpad` and friends are an
   overlay with their own rules about what may live in them, and none of this has
   been tried against one. Numbered and named workspaces both work.
 - **Opening at login needs the bar widget.** The launcher lives in the panel,
   which is loaded whether or not the panel is open — the same reason the
   command line lives there. A bar-less install running only `Service.qml` keeps
-  its layouts and pins applied but starts nothing; `exec-once` and
-  `workspace-layout launch` still work there.
+  its layouts and pins applied but starts nothing. The CLI and login launcher
+  require the bar widget. Use Hyprland's autostart commands for a service-only install.
 - **A pin catches windows as they open.** Pinning an app collects the windows it
   already has once, and after that a window you move somewhere else stays where
   you put it. Switching profiles re-points the rules but does not sweep open

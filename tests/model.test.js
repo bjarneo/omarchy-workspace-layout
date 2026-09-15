@@ -4,6 +4,7 @@ const childProcess = require("node:child_process")
 const fs = require("node:fs")
 const path = require("node:path")
 const Model = require("../Model.js")
+const { qmlFunction } = require("./qml-harness.js")
 
 // --------------------------------------------------- lua interpreter bridge
 //
@@ -18,6 +19,7 @@ function lua_prelude() {
   return [
     "PINS = {}",
     "hl = { layout = { register = function() end },",
+    "       on = function() return {} end,",
     "       workspace_rule = function() return { set_enabled = function() end } end,",
     // Window rules are recorded rather than discarded: the pin tests below read
     // PINS back to prove the rule Hyprland would get says what the config does.
@@ -370,7 +372,7 @@ test("restoring defaults hands every workspace back to Hyprland", () => {
   }
 
   const lua = Model.generateLua(fresh, [1, 4, 7])
-  assert.ok(!lua.includes('"lua:omarchy-wsl-'), "no workspace may still point at a plugin layout")
+  assert.doesNotMatch(lua, /^W\.set_workspace\([^\n]*"lua:omarchy-wsl-/m)
 })
 
 test("restoring defaults is wired to a two-press button", () => {
@@ -592,7 +594,7 @@ test("named live workspaces get stable rules", () => {
     { id: -1339, name: "code" }
   ])
   assert.match(lua, /W\.set_workspace\("name:browser", "lua:omarchy-wsl-focus"\)/)
-  assert.match(lua, /W\.set_workspace\("name:code", "dwindle"\)/)
+  assert.doesNotMatch(lua, /W\.set_workspace\("name:code",/)
 })
 
 test("named workspace keys flow through pins, autostart, commands, and state", () => {
@@ -719,7 +721,7 @@ test("only a match that reduces to plain class names can claim a slot", () => {
   assert.deepEqual(Model.slotKeys("org.gnome.Nautilus"), ["org.gnome.Nautilus"])
   assert.deepEqual(Model.slotKeys("^(firefox|chromium)$"), ["firefox", "chromium"])
   assert.deepEqual(Model.slotKeys("^(fire.*)$"), [])
-  assert.deepEqual(Model.slotKeys("foo[0-9]"), [])
+  assert.deepEqual(Model.slotKeys("foo[0-9]"), ["foo[0-9]"])
 })
 
 test("the search reads names as well as classes, and running beats installed", () => {
@@ -759,13 +761,41 @@ test("the search reads names as well as classes, and running beats installed", (
   assert.equal(plain.command, "")
 })
 
-test("opening an app puts it on the workspace without following it there", () => {
+test("opening an app can follow it to the destination workspace", () => {
   assert.equal(
     Model.launchAppLua("nautilus", 3),
     'hl.exec_cmd("nautilus", { workspace = "3 silent" })'
   )
-  assert.equal(Model.launchAppLua("", 3), "")
-  assert.equal(Model.launchAppLua("nautilus", "special:x"), "")
+  assert.equal(
+    Model.launchAppLua("nautilus", 3, true),
+    'hl.dispatch(hl.dsp.focus({ workspace = "3" }))\n' +
+    'hl.exec_cmd("nautilus", { workspace = "3 silent" })'
+  )
+  assert.equal(Model.launchAppLua("", 3, true), "")
+  assert.equal(Model.launchAppLua("nautilus", "special:x", true), "")
+})
+
+test("following launched apps is an opt-in profile setting", () => {
+  const quiet = Model.normalizeProfile({ name: "quiet" }, [])
+  const following = Model.normalizeProfile({ name: "following", followLaunch: true }, [])
+  const repaired = Model.normalizeProfile({ name: "repaired", followLaunch: "true" }, [])
+
+  assert.equal(quiet.followLaunch, false)
+  assert.equal(following.followLaunch, true)
+  assert.equal(repaired.followLaunch, false)
+})
+
+test("manual launches follow the profile setting while login launches stay silent", () => {
+  const panel = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  const sync = fs.readFileSync(path.join(__dirname, "..", "HyprlandSync.qml"), "utf8")
+
+  assert.match(panel, /readonly property bool followLaunches: Model\.activeProfile\(config\)\.followLaunch/)
+  assert.match(panel, /target\.followLaunch = !target\.followLaunch/)
+  assert.match(panel, /sync\.launch\(command, workspace, followNext\)/)
+  assert.match(panel, /root\.requestLaunch\(String\(root\.selectedWorkspace\), root\.followLaunches\)/)
+  assert.match(panel, /root\.launchMissing\(plan\[i\]\.workspace, plan\[i\]\.apps, false\)/)
+  assert.match(sync, /function launch\(command, workspaceId, follow\)/)
+  assert.match(sync, /Model\.launchAppLua\(command, workspaceId, follow\)/)
 })
 
 test("a hostile command cannot break out of the launch payload",
@@ -831,7 +861,7 @@ test("the search is empty-handed until you type, then finds what is running", ()
 test("a bare class is anchored, a regex is left as written", () => {
   assert.equal(Model.appPattern("firefox"), "^(firefox)$")
   // Anchoring matters: unanchored, `foot` would also claim `footclient`.
-  assert.equal(Model.appPattern("org.gnome.Nautilus"), "^(org.gnome.Nautilus)$")
+  assert.equal(Model.appPattern("org.gnome.Nautilus"), "^(org\\.gnome\\.Nautilus)$")
   assert.equal(Model.appPattern("^(firefox|chromium)$"), "^(firefox|chromium)$")
   assert.equal(Model.normalizeAppMatch("  firefox  "), "firefox")
   assert.equal(Model.normalizeAppMatch(""), null)
@@ -860,6 +890,24 @@ test("the generated file installs a window rule per pin and clears the rest", ()
   assert.ok(cleared.includes("W.reset_apps()"))
   // The runtime always defines W.set_app; what must be gone is any call to it.
   assert.ok(!/^W\.set_app\(/m.test(cleared))
+})
+
+test("a following profile keeps background and unrelated windows silent", () => {
+  const config = Model.normalizeConfig({
+    profiles: [{
+      name: "default",
+      fallback: "dwindle",
+      pins: { firefox: 3 },
+      followLaunch: true
+    }],
+    activeProfile: "default"
+  })
+  const lua = Model.generateLua(config, [1])
+
+  assert.ok(lua.includes('W.set_app("firefox", "^(firefox)$", "3")'))
+  assert.ok(lua.includes('workspace = ws .. " silent"'))
+  assert.doesNotMatch(lua, /background_launches|expect_background|dsp\.focus/)
+  assert.match(lua, /W\.follow_window = function\(\) end/)
 })
 
 test("a layout keeps a place for an app without moving it anywhere", () => {
@@ -1221,7 +1269,7 @@ test("pinning an app is wired to a click and brings its open windows along", () 
 
   const sync = fs.readFileSync(path.join(__dirname, "..", "HyprlandSync.qml"), "utf8")
   assert.match(sync, /function gather\(match, workspaceId\)/)
-  assert.match(sync, /function launch\(command, workspaceId\)/)
+  assert.match(sync, /function launch\(command, workspaceId, follow\)/)
   // A Terminal=true app needs wrapping before it is a window at all.
   assert.match(qml, /function launchCommandFor\(app\)/)
   assert.match(qml, /terminal: entry\.runInTerminal === true/)
@@ -1233,10 +1281,10 @@ test("pinning an app is wired to a click and brings its open windows along", () 
   // Chromium's entry ships the unexpanded token as its StartupWMClass.
   assert.match(qml, /match\.indexOf\("@@"\) !== -1/)
   // One press starts the workspace rather than one press per app.
-  assert.match(qml, /function launchMissing\(workspace, list\)/)
+  assert.match(qml, /function launchMissing\(workspace, list, follow\)/)
   // One window per place the app was given, not one per app.
-  assert.match(qml, /for \(var c = 0; c < wanted; c\+\+\) sync\.launch/)
-  assert.match(qml, /onClicked: root\.launchMissing\(String\(root\.selectedWorkspace\), root\.missingApps\)/)
+  assert.match(qml, /for \(var c = 0; c < wanted; c\+\+\) \{\s*sync\.launch/)
+  assert.match(qml, /onClicked: root\.requestLaunch\(String\(root\.selectedWorkspace\), root\.followLaunches\)/)
 })
 
 test("clicking a workspace goes there, because a layout is edited by watching it", () => {
@@ -1295,12 +1343,21 @@ test("catching an app is wired to the same click that pins one", () => {
   assert.match(qml, /Model\.movedCatches\(layout, rules, from, to, edge\)/)
   assert.match(qml, /Model\.swappedCatches\(rules, from, to\)/)
   // A new profile takes them with it, the way it takes the pins.
-  assert.match(qml, /catches: source && source\.catches \? JSON\.parse/)
+  assert.match(qml, /JSON\.parse\(JSON\.stringify\(source\)\)/)
 })
 
-test("a new profile inherits the pins it was copied from", () => {
-  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
-  assert.match(qml, /pins: source && source\.pins \? JSON\.parse\(JSON\.stringify\(source\.pins\)\) : \{\}/)
+test("a new profile inherits the pins and launch behavior it was copied from", () => {
+  const config = swapFixture()
+  config.profiles[0].followLaunch = true
+  config.profiles[0].manageNamed = true
+  const state = {
+    Model, config, creatingProfile: true, newProfileDraft: "copy", sync: { sync() {} },
+    store: { mutate(change) { change(config) } }
+  }
+  state.root = state
+  qmlFunction("Panel.qml", "createProfile", state)("copy")
+  assert.deepEqual(config.profiles[2], { ...config.profiles[0], name: "copy" })
+  assert.notEqual(config.profiles[2].pins, config.profiles[0].pins)
 })
 
 test("a terminal app is opened in a terminal, under its own class", () => {
@@ -1510,7 +1567,7 @@ test("a login furnishes the session once, however many panels are running", () =
   // What is already open stays open: the plan is built from a fresh read of
   // the windows, which the panel otherwise only polls while it is on screen.
   assert.match(qml, /function beginAutostart\(\)[\s\S]{0,120}refreshCounts\(\)/)
-  assert.match(qml, /Model\.autostartPlan\(config, appCatalog, windowsByWorkspace\)/)
+  assert.match(qml, /Model\.autostartPlan\(config, appCatalog, windowsByWorkspace, tiledWindowsByWorkspace\)/)
   // Two workspaces is two launches, so the second must not replace the first.
   assert.match(qml, /pendingLaunches = pendingLaunches\.concat\(waiting\)/)
 })
@@ -1585,7 +1642,7 @@ test("every pin write carries what the pin already remembered", () => {
   for (const caller of [
     /root\.writePin\(draft, clean, \{ workspace: workspace, slots: next/,
     /root\.writePin\(draft, match, \{ workspace: String\(workspace\), slots: slots \}\)/,
-    /root\.writePin\(draft, match, \{ workspace: key, slots: shot\.pins\[match\] \}\)/,
+    /root\.writePin\(draft, match, \{ workspace: key, slots: shot\.pins\[match\],/,
     /root\.writePin\(draft, to, next\)/
   ]) {
     assert.match(qml, caller)
@@ -1982,7 +2039,8 @@ test("a window opening never edits the layout", () => {
   const calls = qml.match(/keepOverflowPlaces\(\)/g) || []
   assert.equal(calls.length, 2, "declaration and one caller")
   assert.match(qml, /onClicked: root\.keepOverflowPlaces\(\)/)
-  assert.doesNotMatch(qml, /onSelectedWorkspaceChanged: \{/)
+  const selected = /onSelectedWorkspaceChanged: \{([\s\S]*?)\n  \}/.exec(qml)
+  if (selected) assert.doesNotMatch(selected[1], /store\.|keepOverflowPlaces|growForCount/)
   // And the count poll refreshes the rows only.
   assert.match(qml, /if \(!canvas\.dragging\) root\.refreshAppState\(\)/)
 })
@@ -2365,4 +2423,674 @@ test("the manifest matches what the shell and the CLI validator require", () => 
       `${manifest.entryPoints[key]} exists`)
   }
   assert.ok(["left", "center", "right"].includes(manifest.barWidget.defaultSection))
+})
+
+// ------------------------------------------------- swapping workspace numbers
+//
+// A swap renumbers two workspaces in Hyprland and moves everything the active
+// profile keeps by number along with them. The document half is a pure
+// function; the live half is Lua run here against a fake `hl` that records
+// what it was asked to do, in order.
+
+function swapFixture() {
+  return Model.normalizeConfig({
+    activeProfile: "default",
+    layouts: [{ id: "focus", name: "Focus", weights: [25, 50, 25] }],
+    profiles: [
+      {
+        name: "default",
+        fallback: "dwindle",
+        assignments: { 2: "master", 7: "focus" },
+        monitors: { "DP-1": "focus" },
+        catches: { focus: { kitty: [2] } },
+        pins: {
+          foot: { workspace: 2, slots: [1, 2], name: "Foot", command: "foot -e btop" },
+          zed: 7,
+          discord: 9
+        },
+        autostart: [2, 9]
+      },
+      { name: "writing", fallback: "scrolling", assignments: { 2: "focus" }, pins: { obsidian: 2 } }
+    ]
+  })
+}
+
+test("swapping two workspaces trades their layouts, pins and at-login mark", () => {
+  const next = Model.swappedWorkspaces(swapFixture(), 2, 7)
+  const profile = next.profiles[0]
+  assert.deepEqual(profile.assignments, { 2: "focus", 7: "master" })
+  assert.deepEqual(profile.pins.foot,
+    { workspace: "7", slots: [1, 2], name: "Foot", command: "foot -e btop" })
+  assert.equal(profile.pins.zed.workspace, "2")
+  assert.equal(profile.pins.discord.workspace, "9")
+  assert.deepEqual(profile.autostart, ["7", "9"])
+})
+
+test("a swap leaves what is not keyed by workspace alone", () => {
+  const before = swapFixture()
+  const next = Model.swappedWorkspaces(before, 2, 7)
+  assert.deepEqual(next.layouts, before.layouts)
+  assert.deepEqual(next.profiles[0].monitors, before.profiles[0].monitors)
+  assert.deepEqual(next.profiles[0].catches, before.profiles[0].catches)
+  assert.equal(next.profiles[0].fallback, before.profiles[0].fallback)
+  assert.deepEqual(next.profiles[1], before.profiles[1])
+  // The input document is not touched.
+  assert.deepEqual(before, swapFixture())
+})
+
+test("a workspace with nothing assigned stays that way after a swap", () => {
+  const config = Model.normalizeConfig({
+    profiles: [{ name: "default", assignments: { 2: "master" }, autostart: [2] }]
+  })
+  const next = Model.swappedWorkspaces(config, 2, 7)
+  assert.deepEqual(next.profiles[0].assignments, { 7: "master" })
+  assert.equal("2" in next.profiles[0].assignments, false)
+  assert.deepEqual(next.profiles[0].autostart, ["7"])
+})
+
+test("swapping twice restores the document", () => {
+  const original = swapFixture()
+  const back = Model.swappedWorkspaces(Model.swappedWorkspaces(original, 2, 7), 7, 2)
+  assert.deepEqual(back, original)
+})
+
+test("a swap that would change nothing is null", () => {
+  const config = swapFixture()
+  assert.equal(Model.swappedWorkspaces(config, 2, 2), null)
+  assert.equal(Model.swappedWorkspaces(config, 3, 4), null)
+  assert.equal(Model.swappedWorkspaces(config, 0, 2), null)
+  assert.equal(Model.swappedWorkspaces(config, 2, 100), null)
+  assert.equal(Model.swappedWorkspaces(config, "name:code", 2), null)
+  assert.equal(Model.swappedWorkspaces(config, "two", 2), null)
+  // Same layout on both sides and nothing else keyed to either: still nothing.
+  const same = Model.normalizeConfig({
+    profiles: [{ name: "default", assignments: { 2: "master", 7: "master" } }]
+  })
+  assert.equal(Model.swappedWorkspaces(same, 2, 7), null)
+})
+
+// A fake Hyprland for the live half. Workspaces are tables with an id and a
+// layout; `change_id` re-keys them, and, like the real one, does nothing but
+// warn when the target id is taken. Every rule and move is logged in order.
+function swapLuaPrelude(workspaces, options) {
+  const opts = options || {}
+  const rows = workspaces.map((ws) =>
+    `byId[${ws.id}] = { id = ${ws.id}, name = "${ws.name}", tiled_layout = "${ws.layout}" }`)
+  return [
+    "LOG = {}",
+    "byId = {}",
+    "persistent = {}",
+    ...rows,
+    "hl = {",
+    "  get_workspace = function(id) return byId[id] end,",
+    "  get_workspaces = function()",
+    "    local out = {}",
+    "    for _, ws in pairs(byId) do out[#out + 1] = ws end",
+    "    return out",
+    "  end,",
+    "  workspace_rule = function(spec)",
+    '    local flag = spec.persistent == nil and "" or (spec.persistent and " persistent" or " not persistent")',
+    '    LOG[#LOG + 1] = "rule " .. spec.workspace .. " " .. tostring(spec.layout) .. flag',
+    "    persistent[tonumber(spec.workspace)] = spec.persistent and spec.layout or nil",
+    "    return {}",
+    "  end,",
+    // A persistent rule for a number nobody has brings that workspace into
+    // being on the next scheduled pass, which is what the swap asks for.
+    "  exec_scheduled_prop_refresh_immediately = function()",
+    opts.refreshIgnored ? "" : [
+      "    for id, layout in pairs(persistent) do",
+      '      if not byId[id] then byId[id] = { id = id, name = "ws" .. id, tiled_layout = layout } end',
+      "    end"
+    ].join("\n"),
+    "  end,",
+    opts.dispatchIgnored ? "  dispatch = function() end," : "  dispatch = function(d) d() end,",
+    "  dsp = { workspace = {",
+    opts.noChangeId ? "" : [
+      "    change_id = function(o)",
+      "      return function()",
+      '        LOG[#LOG + 1] = "move " .. o.workspace.name .. " " .. o.id',
+      "        if byId[o.id] then return end",
+      "        byId[o.workspace.id] = nil",
+      "        o.workspace.id = o.id",
+      "        byId[o.id] = o.workspace",
+      "      end",
+      "    end"
+    ].join("\n"),
+    "  } }",
+    "}"
+  ].join("\n")
+}
+
+function runSwapLua(prelude, a, b) {
+  return runLua([prelude, Model.evalPayload(Model.swapWorkspacesLua(a, b)),
+    'print(table.concat(LOG, "\\n"))'].join("\n")).trim().split("\n")
+}
+
+test("the live swap parks each destination's rule before moving into it", () => {
+  const prelude = swapLuaPrelude([
+    { id: 2, name: "A", layout: "master" },
+    { id: 7, name: "B", layout: "dwindle" },
+    { id: 2147483647, name: "top", layout: "dwindle" }
+  ])
+  assert.deepEqual(runSwapLua(prelude, 2, 7), [
+    "rule 2147483646 master",
+    "move A 2147483646",
+    "rule 2 dwindle",
+    "move B 2",
+    "rule 7 master",
+    "move A 7"
+  ])
+})
+
+test("a swap with one live workspace first makes the other exist, then lets it go", () => {
+  const prelude = swapLuaPrelude([{ id: 7, name: "B", layout: "lua:omarchy-wsl-focus" }])
+  assert.deepEqual(runSwapLua(prelude, 2, 7), [
+    "rule 2 lua:omarchy-wsl-focus persistent",
+    "rule 2147483647 lua:omarchy-wsl-focus",
+    "move ws2 2147483647",
+    "rule 2 lua:omarchy-wsl-focus",
+    "move B 2",
+    "rule 7 lua:omarchy-wsl-focus",
+    "move ws2 7",
+    // Persistence was set on number 2, where the live workspace now sits, so
+    // it is lifted there; nothing keeps the empty one on 7.
+    "rule 2 lua:omarchy-wsl-focus not persistent"
+  ])
+})
+
+test("a workspace that could not be made to exist stops the swap before anything moves", () => {
+  const prelude = swapLuaPrelude([{ id: 7, name: "B", layout: "master" }], { refreshIgnored: true })
+  assert.throws(() => runSwapLua(prelude, 2, 7), /workspace 2 could not be created/)
+})
+
+test("a swap with neither workspace live touches nothing in Hyprland", () => {
+  assert.deepEqual(runSwapLua(swapLuaPrelude([]), 2, 7), [""])
+})
+
+test("a move that did not land is reported, not trusted", () => {
+  const prelude = swapLuaPrelude([
+    { id: 2, name: "A", layout: "master" },
+    { id: 7, name: "B", layout: "dwindle" }
+  ], { dispatchIgnored: true })
+  assert.throws(() => runSwapLua(prelude, 2, 7), /workspaces 2 and 7 did not swap/)
+})
+
+test("a Hyprland without change_id is told so before anything moves", () => {
+  const prelude = swapLuaPrelude([{ id: 2, name: "A", layout: "master" }], { noChangeId: true })
+  assert.throws(() => runSwapLua(prelude, 2, 7), /needs Hyprland 0\.56 or newer/)
+})
+
+test("the live swap refuses what the document half refuses", () => {
+  assert.equal(Model.swapWorkspacesLua(2, 2), "")
+  assert.equal(Model.swapWorkspacesLua(0, 2), "")
+  assert.equal(Model.swapWorkspacesLua("name:code", 2), "")
+  assert.match(Model.swapWorkspacesLua(2, 7), /hl\.get_workspace\(2\), hl\.get_workspace\(7\)/)
+})
+
+test("swapping two workspaces asks Hyprland first and the document second", () => {
+  const sync = fs.readFileSync(path.join(__dirname, "..", "HyprlandSync.qml"), "utf8")
+  assert.match(sync, /function swap\(from, to\)/)
+  // Its own process: the sync queue is latest-wins, and the gather queue never
+  // reports back, which a swap must.
+  assert.match(sync, /id: swapProcess/)
+  assert.match(sync, /if \(!active \|\| lua === "" \|\| swapping\) return false/)
+  assert.match(sync, /signal swapped\(string from, string to, string profile\)/)
+  assert.match(sync, /signal swapFailed\(string from, string to, string message\)/)
+
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  assert.match(qml, /function swapWorkspaces\(from, to\)/)
+  // The document is swapped only once the compositor has confirmed, so a
+  // refused swap leaves the file as it was.
+  assert.match(qml,
+    /function onSwapped\(from, to, profile\)[\s\S]{0,200}?Model\.swappedWorkspaces\(root\.config, from, to, profile\)/)
+  // The highlighted workspace follows its workspace to the new number.
+  assert.match(qml, /if \(selectedWorkspace === from\) selectedWorkspace = to/)
+  assert.match(qml, /function swap\(a: string, b: string\): string/)
+  assert.match(qml, /if \(!root\.swapWorkspaces\(from, to\)\) return "a swap is already underway"/)
+})
+
+test("a workspace's menu offers a swap with each other numbered workspace in the strip", () => {
+  const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  assert.match(qml, /function swapTargets\(workspace\)/)
+  // The strip's numbered workspaces, empty ones included, never the one the
+  // menu is on, and nothing while a swap is already underway.
+  assert.match(qml, /if \(self === null \|\| sync\.swapping\) return \[\]/)
+  assert.match(qml, /return workspaceRow\.filter\(/)
+  assert.match(qml, /out\.push\(\{ key: "swap:" \+ targets\[t\], label: "Swap with workspace " \+ targets\[t\] \}\)/)
+  // The menu and the command line go through the same entry point.
+  assert.match(qml, /else if \(key\.indexOf\("swap:"\) === 0\) swapWorkspaces\(workspace, key\.slice\(5\)\)/)
+})
+
+function storeFixture() {
+  const state = {
+    Model, config: Model.defaultConfig(), ready: false, fromDisk: false,
+    lastError: "", revision: 0, missingReads: 0, retryRead: false, sourceToken: "missing",
+    path: "/config/workspace-layout.json", loads: [], writes: [],
+    FileViewError: { FileNotFound: 2, PermissionDenied: 3 },
+    console: { warn() {} },
+    loaded(existed) { state.loads.push(existed) },
+    file: { setText(text) { state.writes.push(text) }, reload() {} }
+  }
+  state.root = state
+  for (const name of ["apply", "save", "mutate", "stage", "adopt", "readFailed", "finishPresence"]) {
+    state[name] = qmlFunction("ConfigStore.qml", name, state)
+  }
+  return state
+}
+
+test("a pending config read cannot authorize a save or replace the document", () => {
+  const store = storeFixture()
+  for (let i = 0; i < 4; i++) store.finishPresence(1, 0)
+  assert.equal(store.ready, false)
+  assert.equal(store.revision, 0)
+  assert.equal(store.mutate(draft => { draft.activeProfile = "other" }), false)
+  assert.equal(store.stage(draft => { draft.layouts = [] }), false)
+  assert.deepEqual(store.writes, [])
+})
+
+test("a confirmed first run becomes ready without a config write", () => {
+  const store = storeFixture()
+  store.finishPresence(0, 0)
+  assert.equal(store.ready, false)
+  store.finishPresence(2, 0)
+  assert.equal(store.missingReads, 0)
+  store.finishPresence(0, 0)
+  store.finishPresence(0, 0)
+  assert.equal(store.ready, true)
+  assert.equal(store.fromDisk, false)
+  assert.deepEqual(store.loads, [false])
+  assert.deepEqual(store.writes, [])
+})
+
+test("read failures and invalid JSON preserve the last good custom config", () => {
+  const store = storeFixture()
+  const custom = Model.normalizeConfig({
+    layouts: [{ id: "custom-test", weights: [62, 38] }],
+    profiles: [{ name: "default", assignments: { 2: "custom-test" } }]
+  })
+  store.adopt(JSON.stringify(custom))
+  assert.equal(store.fromDisk, true)
+  for (const error of [store.FileViewError.FileNotFound, store.FileViewError.PermissionDenied]) {
+    store.readFailed(error)
+    store.finishPresence(0, 0)
+    store.finishPresence(0, 0)
+    assert.deepEqual(store.config, custom)
+  }
+  for (const text of ["{", "null", "[]"]) {
+    store.adopt(text)
+    assert.deepEqual(store.config, custom)
+    assert.notEqual(store.lastError, "")
+  }
+  assert.equal(store.revision, 1)
+  assert.deepEqual(store.writes, [])
+})
+
+test("Super+L snapshots preserve file identity and ignore unrelated contents", () => {
+  const record = (id, stamp, content) => "\u001e" + id + "\u001f" + stamp + "\u001f" + content + "\n"
+  const snapshot = Model.parseOmarchyToggleSnapshot(
+    record(4, "first", 'hl.workspace_rule({ workspace = "4", layout = "dwindle" })') +
+    record(2, "second", 'hl.workspace_rule({ workspace = "2", layout = "scrolling" })') +
+    record(7, "wrong-file", 'hl.workspace_rule({ workspace = "4", layout = "master" })'))
+  assert.deepEqual(snapshot, {
+    2: { layout: "scrolling", stamp: "second" }, 4: { layout: "dwindle", stamp: "first" }
+  })
+  assert.deepEqual(Model.omarchyToggleChanges(snapshot, snapshot, {}), [])
+  const changed = { ...snapshot, 2: { layout: "scrolling", stamp: "rewritten" } }
+  assert.deepEqual(Model.omarchyToggleChanges(snapshot, changed, {}), [
+    { workspace: "2", layout: "scrolling", onlyBuiltins: false }
+  ])
+  assert.deepEqual(Model.omarchyToggleChanges(snapshot, { 4: snapshot[4] }, {}), [])
+  assert.deepEqual(Model.omarchyToggleChanges(snapshot, snapshot, { 4: true }), [
+    { workspace: "4", layout: "dwindle", onlyBuiltins: false }
+  ])
+})
+
+test("a Super+L startup scan protects custom monitor defaults", () => {
+  const config = Model.normalizeConfig({
+    profiles: [{ name: "default", monitors: { "DP-1": "focus" }, assignments: { 4: "golden" } }]
+  })
+  const snapshot = { 2: { layout: "scrolling", stamp: "old" }, 4: { layout: "dwindle", stamp: "old" } }
+  const changes = Model.omarchyToggleChanges(null, snapshot, {})
+  assert.equal(Model.followOmarchyToggles(config, changes, { workspaceMonitors: { 2: "DP-1" } }), null)
+  const updated = Model.followOmarchyToggles(config,
+    Model.omarchyToggleChanges(snapshot, { ...snapshot, 2: { layout: "scrolling", stamp: "new" } }, {}),
+    { workspaceMonitors: { 2: "DP-1" } })
+  assert.equal(Model.layoutIdForWorkspace(updated, 2, "DP-1"), "scrolling")
+  assert.equal(Model.layoutIdForWorkspace(updated, 4), "golden")
+})
+
+function syncFixture() {
+  const state = {
+    Model, config: Model.defaultConfig(), active: true, syncWanted: false,
+    pendingSync: "", currentSync: "", pendingGathers: [], pendingPreview: "",
+    sourceToken: "", documentPath: "/config/workspace-layout.json", pendingToken: "", currentToken: "",
+    swapping: false, swapInFlight: false, pendingSwap: "", swapFrom: "", swapTo: "", swapProfile: "",
+    workspacesReady: false, liveWorkspaceMonitors: {}, liveWorkspaceLayouts: {}, previousWorkspaceNames: null,
+    workspacesRead() {}, workspacesRenamed() {}
+  }
+  state.root = state
+  for (const name of ["workspaceRead", "syncProcess", "gatherProcess", "previewProcess", "swapProcess"]) {
+    state[name] = { running: false, command: [] }
+  }
+  for (const name of ["sync", "drive", "acceptWorkspaces", "gather", "launch", "swap"]) {
+    state[name] = qmlFunction("HyprlandSync.qml", name, state)
+  }
+  return state
+}
+
+test("a full sync uses fresh compositor data instead of the QML monitor cache", () => {
+  const sync = syncFixture()
+  sync.config.profiles[0].monitors = { "DP-1": "focus", "DP-2": "master" }
+  sync.workspaceMonitors = { 2: "DP-1", 7: "DP-2" }
+  sync.sync()
+  assert.equal(sync.syncProcess.running, false)
+  assert.equal(sync.workspaceRead.running, true)
+  sync.workspaceRead.running = false
+  sync.acceptWorkspaces(JSON.stringify([
+    { id: 2, name: "2", monitor: "DP-2" }, { id: 7, name: "7", monitor: "DP-1" }
+  ]))
+  sync.drive()
+  assert.match(sync.currentSync, /W\.set_workspace\("2", "master"\)/)
+  assert.match(sync.currentSync, /W\.set_workspace\("7", "lua:omarchy-wsl-focus"\)/)
+  assert.equal(sync.syncProcess.running, true)
+})
+
+test("sync waits for a trustworthy config and keeps one-shot actions behind it", () => {
+  const sync = syncFixture()
+  sync.active = false
+  sync.sync()
+  sync.launch("foot", 2, true)
+  assert.equal(sync.workspaceRead.running, false)
+  assert.deepEqual(sync.pendingGathers, [])
+  sync.active = true
+  sync.sync()
+  sync.launch("foot", 2, false)
+  assert.equal(sync.gatherProcess.running, false)
+  sync.workspaceRead.running = false
+  sync.acceptWorkspaces("[]")
+  sync.drive()
+  assert.equal(sync.syncProcess.running, true)
+  assert.equal(sync.gatherProcess.running, false)
+  sync.syncProcess.running = false
+  sync.drive()
+  assert.equal(sync.gatherProcess.running, true)
+})
+
+test("a swap drains prior actions and holds new syncs until the document follows", () => {
+  const sync = syncFixture()
+  sync.launch("foot", 2, false)
+  assert.equal(sync.swap(2, 7), true)
+  assert.equal(sync.swap(3, 4), false)
+  assert.equal(sync.swapProcess.running, false)
+  sync.gatherProcess.running = false
+  sync.drive()
+  assert.equal(sync.swapProcess.running, true)
+  sync.sync()
+  assert.equal(sync.workspaceRead.running, false)
+  sync.swapProcess.running = false
+  assert.equal(sync.swapInFlight, true)
+  sync.config = Model.swappedWorkspaces(sync.config, 2, 7) || sync.config
+  sync.swapInFlight = false
+  sync.swapping = false
+  sync.drive()
+  assert.equal(sync.workspaceRead.running, true)
+})
+
+test("a completed swap changes the profile that requested it", () => {
+  const config = swapFixture()
+  config.activeProfile = "writing"
+  const next = Model.swappedWorkspaces(config, 2, 7, "default")
+  assert.equal(next.activeProfile, "writing")
+  assert.deepEqual(next.profiles[1], config.profiles[1])
+  assert.deepEqual(next.profiles[0].assignments, { 2: "focus", 7: "master" })
+})
+
+test("one manual workspace launch follows once across all its apps and windows", () => {
+  const calls = []
+  const state = {
+    editable: true, pendingLaunches: [], runningApps: [], launchBaseline: {},
+    launchCommandFor: app => app.command,
+    sync: { launch: (...args) => calls.push(args) },
+    launchWatch: { restart() {} }
+  }
+  state.root = state
+  const launch = qmlFunction("Panel.qml", "launchMissing", state)
+  launch("3", [
+    { match: "foot", name: "Foot", command: "foot", count: 3 },
+    { match: "editor", name: "Editor", command: "editor", count: 2 }
+  ], true)
+  assert.deepEqual(calls.map(call => call[2]), [true, false, false, false, false])
+  calls.length = 0
+  launch("3", [{ match: "browser", command: "browser", count: 2 }], false)
+  assert.deepEqual(calls.map(call => call[2]), [false, false])
+})
+
+test("follow happens before launch and late windows cannot take focus", { skip: !luaAvailable }, () => {
+  const output = runLua([
+    lua_prelude(),
+    "FOCUS = '1'; EVENTS = {}; LAUNCHES = {}",
+    "hl.on = function(name, callback) EVENTS[name] = callback end",
+    "hl.dsp.focus = function(options) return options.workspace end",
+    "hl.dispatch = function(workspace) FOCUS = workspace end",
+    "hl.exec_cmd = function(command, rules) LAUNCHES[#LAUNCHES + 1] = rules.workspace end",
+    Model.generateLua(Model.defaultConfig(), [1, 3]),
+    Model.launchAppLua("editor", 3, false),
+    Model.launchAppLua("browser", 3, true),
+    "assert(FOCUS == '3'); FOCUS = '9'",
+    "for i = 1, 4 do _G.__omarchy_wsl.follow_window({ workspace = { id = 3 } }) end",
+    "assert(FOCUS == '9'); assert(LAUNCHES[1] == '3 silent' and LAUNCHES[2] == '3 silent')",
+    "print('ok')"
+  ].join("\n"))
+  assert.equal(output.trim(), "ok")
+})
+
+test("named workspaces require an explicit workspace, monitor, or global claim", () => {
+  const config = Model.defaultConfig()
+  assert.equal(Model.isWorkspaceManaged(config, "name:code", "DP-1"), false)
+  config.profiles[0].monitors["DP-1"] = "focus"
+  assert.equal(Model.isWorkspaceManaged(config, "name:code", "DP-1"), true)
+  assert.equal(Model.isWorkspaceManaged(config, "name:code", "DP-2"), false)
+  config.profiles[0].assignments["name:code"] = "master"
+  assert.equal(Model.isWorkspaceManaged(config, "name:code", "DP-2"), true)
+  delete config.profiles[0].assignments["name:code"]
+  config.profiles[0].manageNamed = true
+  assert.equal(Model.isWorkspaceManaged(config, "name:code", "DP-2"), true)
+  config.profiles[0].assignments["name:code"] = "hyprland"
+  assert.equal(Model.isWorkspaceManaged(Model.normalizeConfig(config), "name:code", "DP-1"), false)
+  assert.equal(Model.normalizeProfile({ fallback: "scrolling" }, []).manageNamed, true)
+  assert.equal(Model.normalizeProfile({ fallback: "scrolling", manageNamed: false }, []).manageNamed, false)
+})
+
+test("a named workspace release restores its previous layout without replacing a foreign choice", { skip: !luaAvailable }, () => {
+  const claimed = Model.defaultConfig()
+  claimed.profiles[0].assignments["name:code"] = "focus"
+  const unclaimed = Model.defaultConfig()
+  const output = runLua([
+    lua_prelude(),
+    "WORKSPACE = { id = -1337, tiled_layout = 'master' }",
+    "hl.get_workspace = function(name) return name == 'name:code' and WORKSPACE or nil end",
+    "hl.workspace_rule = function(spec)",
+    "  if spec.workspace == 'name:code' then WORKSPACE.tiled_layout = spec.layout end",
+    "  return { set_enabled = function() error('Do not disable a shared rule') end }",
+    "end",
+    Model.evalPayload(Model.generateLua(claimed, ["name:code"])),
+    "assert(WORKSPACE.tiled_layout == 'lua:omarchy-wsl-focus')",
+    Model.evalPayload(Model.generateLua(unclaimed, ["name:code"])),
+    "assert(WORKSPACE.tiled_layout == 'master')",
+    Model.evalPayload(Model.generateLua(claimed, ["name:code"])),
+    "WORKSPACE.tiled_layout = 'scrolling'",
+    Model.evalPayload(Model.generateLua(unclaimed, ["name:code"])),
+    "assert(WORKSPACE.tiled_layout == 'scrolling')",
+    Model.evalPayload(Model.generateLua(claimed, ["name:code"])),
+    Model.evalPayload(Model.generateLua(unclaimed, ["name:code"])),
+    "assert(WORKSPACE.tiled_layout == 'scrolling'); print('ok')"
+  ].join("\n"))
+  assert.equal(output.trim(), "ok")
+})
+
+test("workspace name swaps move assignments, pins and login marks across all profiles", () => {
+  const config = Model.normalizeConfig({ profiles: [
+    { name: "default", assignments: { "name:code": "focus", "name:chat": "master" },
+      pins: { editor: { workspace: "name:code", command: "editor --profile=work", slots: [1] } },
+      autostart: ["name:code"] },
+    { name: "other", assignments: { "name:code": "golden" }, pins: { browser: "name:chat" } }
+  ] })
+  const renames = Model.workspaceRenames(
+    { "-1337": "name:code", "-1338": "name:chat", "2": "2" },
+    { "-1337": "name:chat", "-1338": "name:code", "2": "7" })
+  const next = Model.renamedWorkspaces(config, renames)
+  assert.deepEqual(next.profiles[0].assignments, { "name:chat": "focus", "name:code": "master" })
+  assert.equal(next.profiles[0].pins.editor.workspace, "name:chat")
+  assert.equal(next.profiles[0].pins.editor.command, "editor --profile=work")
+  assert.deepEqual(next.profiles[0].autostart, ["name:chat"])
+  assert.equal(next.profiles[1].pins.browser.workspace, "name:code")
+  assert.equal(next.profiles[1].assignments["name:chat"], "golden")
+  assert.deepEqual(Model.renamedWorkspaces(next, renames), config)
+})
+
+test("custom launch commands use distinct classes without replacing another profile pin", () => {
+  const config = Model.defaultConfig()
+  const first = Model.editedPin(config, "", "browser-work", "name:work", "1",
+    "browser --class=browser-work --user-data-dir='$HOME/work profile'", "Work browser", 0)
+  const second = Model.editedPin(first, "", "browser-personal", "3", "2", "browser --class=browser-personal", "Personal", 0)
+  assert.equal(Model.pinEntries(second).length, 2)
+  assert.equal(Model.missingApps(second, "name:work", [], {})[0].command,
+    "browser --class=browser-work --user-data-dir='$HOME/work profile'")
+  assert.equal(Model.missingApps(second, 3, [], {})[0].command, "browser --class=browser-personal")
+  assert.notEqual(Model.pinEditorError(second, "browser-work", "browser-personal", "browser", "", 0), "")
+  assert.equal(Model.editedPin(second, "browser-work", "browser-personal", 3, "", "browser", "", 0), null)
+  const renamed = Model.editedPin(second, "browser-work", "browser-office", "name:work", "1", "browser --class=browser-office", "Office", 0)
+  assert.equal(Model.activeProfile(renamed).pins["browser-work"], undefined)
+  assert.equal(Model.activeProfile(renamed).pins["browser-office"].name, "Office")
+})
+
+test("the app editor rejects invalid input instead of truncating a launch command", () => {
+  const config = Model.defaultConfig()
+  for (const [match, command, slots, group] of [
+    ["", "browser", "", 0], ["browser", "", "", 0],
+    ["browser", "x".repeat(Model.MAX_COMMAND_LENGTH + 1), "", 0],
+    ["browser", "browser\n--bad", "", 0], ["browser", "browser", "9", 0],
+    ["browser", "browser", "one", 0], ["browser", "browser", "1", 1.5],
+    ["^(browser|editor)$", "browser", "1", 2]
+  ]) assert.notEqual(Model.pinEditorError(config, "", match, command, slots, group), "")
+})
+
+test("config fingerprints agree with Lua for UTF-8 and stop stale syncs", { skip: !luaAvailable }, () => {
+  const text = '{"name":"配置 😊","path":"quoted \\\"path"}\n'
+  const prelude = "io.open = function() return { read = function() return " + JSON.stringify(text) + "; end, close = function() end } end"
+  const output = runLua(prelude + "\n" + Model.guardConfigLua("print('applied')", "/config/layout.json", Model.contentToken(text)))
+  assert.equal(output.trim(), "applied")
+  assert.throws(() => runLua(prelude + "\n" + Model.guardConfigLua("print('wrong')", "/config/layout.json", Model.contentToken("stale"))), /config changed/)
+  assert.throws(() => runLua(prelude + "\n" + Model.guardConfigLua("print('wrong')", "/config/layout.json", "missing")), /config changed/)
+  assert.equal(Model.contentToken("hello"), "4f9f2cab")
+})
+
+function groupedClients() {
+  const members = ["0xa", "0xb", "0xc", "0xd"]
+  return members.map((address, index) => ({ address, grouped: members, class: "mail",
+    workspace: { id: 2, name: "2" }, at: [0, 0], size: [1000, 800],
+    mapped: true, floating: false, hidden: index !== 2 }))
+}
+
+test("capture and canvas count a group once while launch counts keep its members", () => {
+  const clients = groupedClients()
+  const state = Model.clientSnapshot(clients)
+  assert.deepEqual(state.counts, { 2: 1 })
+  assert.deepEqual(state.windows, { 2: { mail: 4 } })
+  const capture = Model.captureClients(clients, 2)
+  assert.equal(Model.totalCells(capture.layout.cells), 1)
+  assert.deepEqual(capture.pins, { mail: [1] })
+  assert.deepEqual(capture.groups, { mail: 4 })
+  assert.equal(Model.tiledTargets(clients)[0].window.address, "0xc")
+})
+
+test("mixed groups keep one place without a false per-app group claim", () => {
+  const clients = groupedClients()
+  clients[0].class = "browser"
+  const capture = Model.captureClients(clients, 2)
+  assert.equal(Model.totalCells(capture.layout.cells), 1)
+  assert.deepEqual(capture.groups, {})
+  assert.deepEqual(capture.pins, { browser: [1], mail: [1] })
+})
+
+test("a grouped pin restores its member count and ignores floating dialogs", () => {
+  const config = Model.normalizeConfig({ profiles: [{ name: "default", autostart: [2], pins: {
+    mail: { workspace: 2, slots: [1, 3], group: 4, command: "mail" }
+  } }] })
+  const clients = groupedClients().slice(0, 2)
+  clients.push({ class: "mail", workspace: { id: 2 }, mapped: true, floating: true })
+  const state = Model.clientSnapshot(clients)
+  const plan = Model.autostartPlan(config, [], state.windows, state.tiledWindows)
+  assert.equal(plan[0].apps[0].count, 2)
+  assert.deepEqual(Model.activeProfile(config).pins.mail.slots, [1])
+  assert.equal(Model.normalizePin({ workspace: 2, group: 999 }).group, Model.MAX_GROUP_WINDOWS)
+  assert.equal(Model.normalizePin({ workspace: 2, group: true }).group, undefined)
+})
+
+test("place edits and class corrections preserve group metadata", () => {
+  const pins = { mail: { workspace: "2", slots: [1], command: "mail", group: 4 } }
+  const swapped = Model.swappedPins(pins, 2, 1, 2)
+  assert.equal(swapped.mail.group, 4)
+  const moved = Model.movePlaceInto(Model.normalizeLayout({ weights: [50, 50] }), pins, 2, 1, 2, "bottom")
+  assert.equal(moved.pins.mail.group, 4)
+  const state = { Model, config: Model.normalizeConfig({ profiles: [{ name: "default", pins }] }) }
+  state.root = state
+  const write = qmlFunction("Panel.qml", "writePin", state)
+  write(state.config, "mail", { slots: [2] })
+  assert.equal(state.config.profiles[0].pins.mail.group, 4)
+})
+
+test("long named workspaces produce valid terminal classes and swaps cannot reuse a pinned class", () => {
+  const name = "name:" + "Monitor description 配置 ".repeat(10)
+  const first = Model.terminalClassFor("nvim", name)
+  assert.ok(first.length < 120)
+  const config = Model.normalizeConfig({ profiles: [{ name: "default", pins: { [first]: { workspace: 7 } } }] })
+  const second = Model.terminalClassFor("nvim", name, config)
+  assert.notEqual(first, second)
+  assert.equal(Model.normalizeAppMatch(second), second)
+})
+
+test("full sync refreshes plugin layouts and leaves builtin layout messages alone", { skip: !luaAvailable }, () => {
+  const lua = Model.generateLua(Model.defaultConfig(), [1])
+  const output = runLua([
+    lua_prelude(), "RELAYOUTS = 0; ACTIVE = 'dwindle'",
+    "hl.get_active_workspace = function() return { tiled_layout = ACTIVE } end",
+    "hl.dsp.layout = function() return 'relayout' end",
+    "hl.dispatch = function() RELAYOUTS = RELAYOUTS + 1 end",
+    Model.evalPayload(lua), "assert(RELAYOUTS == 0)",
+    "ACTIVE = 'lua:omarchy-wsl-focus'", Model.evalPayload(lua),
+    "assert(RELAYOUTS == 1); print('ok')"
+  ].join("\n"))
+  assert.equal(output.trim(), "ok")
+})
+
+test("literal browser classes cannot match another profile's class", () => {
+  const pattern = new RegExp(Model.appPattern("browser.work"))
+  assert.equal(pattern.test("browser.work"), true)
+  assert.equal(pattern.test("browser-work"), false)
+  assert.equal(new RegExp(Model.appPattern("editor[work]")).test("editor[work]"), true)
+})
+
+test("a failed sync releases a queued swap without starting it", () => {
+  const state = syncFixture()
+  let failed = ""
+  state.swapFailed = (from, to, message) => { failed = message }
+  state.sync()
+  state.swap(2, 7)
+  qmlFunction("HyprlandSync.qml", "abortPendingSwap", state)("Config changed")
+  assert.equal(state.swapping, false)
+  assert.equal(state.pendingSwap, "")
+  assert.equal(state.swapProcess.running, false)
+  assert.equal(failed, "Config changed")
+})
+
+test("an intermediate duplicate name cannot erase assignments during a name swap", () => {
+  const sync = syncFixture()
+  sync.acceptWorkspaces(JSON.stringify([{ id: -1337, name: "a" }, { id: -1338, name: "b" }]))
+  let renamed = null
+  sync.workspacesRenamed = value => { renamed = value }
+  sync.acceptWorkspaces(JSON.stringify([{ id: -1337, name: "b" }, { id: -1338, name: "b" }]))
+  assert.equal(renamed, null)
+  sync.acceptWorkspaces(JSON.stringify([{ id: -1337, name: "b" }, { id: -1338, name: "a" }]))
+  assert.deepEqual(renamed, { "name:a": "name:b", "name:b": "name:a" })
 })

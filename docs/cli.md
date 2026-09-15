@@ -133,6 +133,30 @@ $ omarchy-shell workspace-layout reset 3
 workspace 3 handed back to Hyprland
 ```
 
+A named workspace returns to its previous Hyprland layout. The `hyprland`
+assignment prevents a monitor or global default from claiming it again.
+
+### `swap <a> <b>`
+
+Two workspaces trade numbers. Windows and tiling go with their workspace, and
+so does what the profile keeps by number: the layout each was given, the apps
+pinned there, and its `at login` mark. A workspace that does not exist yet is
+fine — the one that does takes its number.
+
+```
+$ omarchy-shell workspace-layout swap 2 7
+swapping workspace 2 and workspace 7
+```
+
+Numbered workspaces only, 1 to 99, on Hyprland 0.56 or newer. Swapping the
+same two again puts everything back. The reply comes when Hyprland has been
+asked; a swap it refuses is logged by the shell and changes nothing on disk.
+Omarchy's own Super+L files for the two numbers are removed, since they would
+put the old layouts back; the next press recreates them.
+
+The sync reads the new monitor map before it applies the swapped document.
+Unchanged Super+L files for other workspaces do not override their layouts.
+
 ### `pin <app> <workspace> <slots>`
 
 Send an app to a workspace, optionally into particular places. `<app>` is a
@@ -149,6 +173,33 @@ signal opens on workspace 9
 
 Windows the app already has are collected onto the workspace as the pin is
 made; after that they are yours to move.
+
+### `pincommand <app> <workspace> <slots> <command>`
+
+Save a launch command with a pin. The command must create the window class named
+by `<app>`. Quote the command as one argument.
+
+```sh
+omarchy-shell workspace-layout pincommand chromium-work 2 1 \
+  'chromium --user-data-dir="$HOME/.local/share/chromium-work" --class=chromium-work'
+```
+
+Use separate classes and user-data directories for separate browser instances.
+Commands support up to 4096 characters. The app editor also supports a display name.
+
+### `group <app> <workspace> <count>`
+
+Restore a same-class tab group in the pin's first slot. The count supports 1 to
+32 windows. Zero disables restoration and separates the app's same-class groups.
+Mixed-class groups stay intact.
+
+```sh
+omarchy-shell workspace-layout group chromium-work 2 4
+omarchy-shell workspace-layout group chromium-work 2 0
+```
+
+This command creates the pin if it does not exist. Group restoration requires
+Hyprland 0.56 or newer.
 
 ### `unpin <app>`
 
@@ -185,6 +236,9 @@ Read the workspace back into a layout: the shape its windows are already in
 becomes a new layout assigned to it, and every app is pinned to the place it
 was in. Two windows of the same app become two places on one pin.
 
+A same-class tab group becomes one place with a `group` count on its pin.
+The canvas also counts each tab group once.
+
 ```
 $ omarchy-shell workspace-layout capture 9
 captured workspace 9
@@ -194,7 +248,9 @@ captured workspace 9
 
 Open what the workspace is short of: for every app pinned there, one window per
 place it was given, minus the windows it already has. Apps with no launcher and
-no remembered command are skipped — there is nothing to run.
+no remembered command are skipped — there is nothing to run. The active
+profile's `followLaunch` setting applies here too: with it enabled, the command
+switches to the destination workspace; otherwise it opens there silently.
 
 A `Terminal=true` app (`nvim`, `btop`, a TUI player) is opened in your terminal
 under a window class of the plugin's own, so the pin can place it; the class and
@@ -203,8 +259,15 @@ ones after put the app straight in its place.
 
 ```
 $ omarchy-shell workspace-layout launch 9
-opening Foot ×3, Signal on workspace 9
+start requested for workspace 9
 ```
+
+The command reads fresh window counts before it launches apps. A group pin uses
+its member count instead of its slot count. Floating dialogs do not satisfy it.
+The reply acknowledges the request before the apps open.
+
+With `followLaunch` enabled, the request switches workspaces once. Later windows
+open silently. Login launches always stay silent.
 
 This is exactly what the panel's `at login → open these` does for you a few
 seconds into a session. Driving it from Hyprland instead means waiting for the
@@ -226,6 +289,30 @@ Bind it in `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER + ALT + L", "Workspace layout", "omarchy-shell workspace-layout toggle")
+```
+
+### Use a prefix key
+
+To select layouts with a prefix key, use a Hyprland submap in `~/.config/hypr/bindings.lua`.
+This example uses `SUPER + ALT + L`, followed by `D`, `G`, or `S`.
+
+```lua
+local function choose_layout(layout)
+  local workspace = hl.get_active_workspace()
+  hl.dispatch(hl.dsp.submap("reset"))
+  if not workspace then return end
+  local key = workspace.config_name
+  local quoted = "'" .. key:gsub("'", "'\\''") .. "'"
+  hl.exec_cmd("omarchy-shell workspace-layout set " .. quoted .. " " .. layout)
+end
+
+hl.bind("SUPER + ALT + L", hl.dsp.submap("workspace-layout"))
+hl.define_submap("workspace-layout", function()
+  hl.bind("D", function() choose_layout("dwindle") end)
+  hl.bind("G", function() choose_layout("golden") end)
+  hl.bind("S", function() choose_layout("scrolling") end)
+  hl.bind("Escape", hl.dsp.submap("reset"))
+end)
 ```
 
 ## Scripting a desk

@@ -1039,7 +1039,7 @@ function normalizeProfile(raw, layouts) {
     var value = String(rawAssignments[key])
     // A layout that was deleted out from under a profile silently reverts to
     // the fallback rather than pinning the workspace to a layout that is gone.
-    if (!known[value] && !isBuiltin(value)) continue
+    if (!known[value] && !isBuiltin(value) && !(workspace.indexOf("name:") === 0 && value === "hyprland")) continue
     assignments[workspace] = value
   }
 
@@ -1057,6 +1057,11 @@ function normalizeProfile(raw, layouts) {
     if (match === null) continue
     var pin = normalizePin(rawPins[app])
     if (pin === null) continue
+    if (pin.group && slotKeys(match).length !== 1) {
+      var ungrouped = JSON.parse(JSON.stringify(rawPins[app]))
+      delete ungrouped.group
+      pin = normalizePin(ungrouped)
+    }
     pins[match] = pin
   }
 
@@ -1083,7 +1088,9 @@ function normalizeProfile(raw, layouts) {
     monitors: monitors,
     pins: pins,
     catches: normalizeCatches(input.catches, known),
-    autostart: normalizeAutostart(input.autostart)
+    autostart: normalizeAutostart(input.autostart),
+    followLaunch: input.followLaunch === true,
+    manageNamed: input.manageNamed === true || (input.manageNamed === undefined && fallback !== "dwindle")
   }
 }
 
@@ -1138,6 +1145,88 @@ function workspaceKey(value) {
   return normalizeWorkspaceKey(value)
 }
 
+// Use the compositor's reply for sync. QML workspace objects can carry old ids after a swap.
+function workspaceSnapshot(workspaces) {
+  var list = workspaces instanceof Array ? workspaces : []
+  var ids = []
+  var monitors = {}
+  var names = {}
+  var layouts = {}
+  for (var i = 0; i < list.length; i++) {
+    var workspace = list[i]
+    var key = workspaceKey(workspace)
+    if (key === null) continue
+    if (ids.indexOf(key) === -1) ids.push(key)
+    names[String(workspace.id)] = key
+    var monitor = workspace.monitor
+    var name = normalizeMonitorName(monitor && typeof monitor === "object" ? monitor.name : monitor)
+    if (name !== null) monitors[key] = name
+    var layout = String(workspace.tiledLayout || workspace.tiled_layout || "")
+    var prefix = "lua:" + LAYOUT_PREFIX
+    if (layout.indexOf(prefix) === 0) layout = layout.slice(prefix.length)
+    if (layout !== "") layouts[key] = layout
+  }
+  return { ids: ids, monitors: monitors, names: names, layouts: layouts }
+}
+
+function workspaceRenames(previous, current) {
+  var out = {}
+  if (!previous || !uniqueWorkspaceNames(current)) return out
+  for (var id in current) {
+    var before = previous[id]
+    var after = current[id]
+    if (before && before !== after && before.indexOf("name:") === 0 && after.indexOf("name:") === 0) {
+      out[before] = after
+    }
+  }
+  return out
+}
+
+function uniqueWorkspaceNames(names) {
+  var seen = {}
+  for (var id in names) {
+    var name = names[id]
+    if (name.indexOf("name:") !== 0) continue
+    if (seen[name]) return false
+    seen[name] = true
+  }
+  return true
+}
+
+// Re-key all profiles together. Simultaneous name swaps must read from the original maps.
+function renamedWorkspaces(config, renames) {
+  var map = {}
+  for (var from in (renames || {})) {
+    var before = workspaceKey(from)
+    var after = workspaceKey(renames[from])
+    if (before && after && before !== after && before.indexOf("name:") === 0 && after.indexOf("name:") === 0) {
+      map[before] = after
+    }
+  }
+  var draft = normalizeConfig(config)
+  var changed = false
+  for (var i = 0; i < draft.profiles.length; i++) {
+    var profile = draft.profiles[i]
+    var assignments = {}
+    for (var key in profile.assignments) {
+      assignments[map[key] || key] = profile.assignments[key]
+      if (map[key]) changed = true
+    }
+    profile.assignments = assignments
+    for (var match in profile.pins) {
+      var pin = profile.pins[match]
+      if (!map[pin.workspace]) continue
+      pin.workspace = map[pin.workspace]
+      changed = true
+    }
+    profile.autostart = normalizeAutostart(profile.autostart.map(function(key) {
+      if (map[key]) changed = true
+      return map[key] || key
+    }))
+  }
+  return changed ? draft : null
+}
+
 function workspaceLabel(value) {
   var key = normalizeWorkspaceKey(value)
   return key && key.indexOf("name:") === 0 ? key.slice(5) : key
@@ -1175,6 +1264,15 @@ function normalizeAppMatch(value) {
 //
 // `"slot": 2` is still read — it is what the short hand-written form says, and
 // what this plugin's own config said before slots could be plural.
+var MAX_COMMAND_LENGTH = 4096
+var MAX_GROUP_WINDOWS = 32
+
+function normalizeGroup(value) {
+  if (typeof value === "boolean") return 0
+  var count = Math.round(Number(value))
+  return isFiniteNumber(count) && count > 0 ? Math.min(count, MAX_GROUP_WINDOWS) : 0
+}
+
 function normalizePin(value) {
   var raw = (value && typeof value === "object") ? value : { workspace: value }
   var workspace = normalizeWorkspaceKey(raw.workspace)
@@ -1188,7 +1286,7 @@ function normalizePin(value) {
   var command = String(raw.command === undefined || raw.command === null ? "" : raw.command)
     .replace(/[\u0000-\u001f\u007f]/g, "")
     .trim()
-    .slice(0, 400)
+    .slice(0, MAX_COMMAND_LENGTH)
   var input = (raw.slots instanceof Array) ? raw.slots : (raw.slot === undefined ? [] : [raw.slot])
   var slots = []
   var seen = {}
@@ -1207,7 +1305,56 @@ function normalizePin(value) {
   // machine maps that back to "Discord".
   if (name !== null) pin.name = name.slice(0, 60)
   if (command !== "") pin.command = command
+  var group = normalizeGroup(raw.group)
+  if (group > 0) {
+    pin.group = group
+    pin.slots = slots.slice(0, 1)
+  }
   return pin
+}
+
+function pinEditorError(config, original, match, command, slots, group) {
+  var clean = String(match || "").trim()
+  if (clean === "") return "Enter a window class."
+  if (normalizeAppMatch(clean) !== clean) return "Use a window class with at most 120 characters and no control characters."
+  var existing = activeProfile(config).pins || {}
+  if (original !== clean && existing[clean]) return "This class already has a pin. Edit that pin instead."
+  var cmd = String(command || "")
+  if (original === "" && cmd.trim() === "") return "Enter the command that opens this window class."
+  if (cmd.length > MAX_COMMAND_LENGTH) return "Use a command with at most " + MAX_COMMAND_LENGTH + " characters."
+  if (/[\u0000-\u001f\u007f]/.test(cmd)) return "Use one command line without control characters."
+  var list = String(slots || "").trim()
+  if (list !== "") {
+    var parts = list.split(/[\s,]+/)
+    for (var i = 0; i < parts.length; i++) {
+      if (!/^\d+$/.test(parts[i]) || Number(parts[i]) < 1 || Number(parts[i]) > MAX_SLOTS) {
+        return "Use slot numbers from 1 to " + MAX_SLOTS + ", separated by commas."
+      }
+    }
+  }
+  var count = Number(group || 0)
+  if (!isFiniteNumber(count) || Math.round(count) !== count || count < 0 || count > MAX_GROUP_WINDOWS) {
+    return "Use a group count from 0 to " + MAX_GROUP_WINDOWS + "."
+  }
+  if (count > 0 && slotKeys(clean).length !== 1) return "A tab group must match one window class."
+  return ""
+}
+
+function editedPin(config, original, match, workspace, slots, command, name, group) {
+  var key = workspaceKey(workspace)
+  if (key === null || pinEditorError(config, original, match, command, slots, group) !== "") return null
+  var draft = normalizeConfig(config)
+  var profile = activeProfile(draft)
+  var clean = normalizeAppMatch(match)
+  var pin = JSON.parse(JSON.stringify(profile.pins[original] || {}))
+  pin.workspace = key
+  pin.slots = parseSlots(slots)
+  pin.command = String(command || "").trim()
+  pin.name = String(name || "").trim()
+  pin.group = normalizeGroup(group)
+  if (original && original !== clean) delete profile.pins[original]
+  profile.pins[clean] = normalizePin(pin)
+  return draft
 }
 
 // Which places a layout claims for an app, wherever that layout is running.
@@ -1279,7 +1426,7 @@ function normalizeCatches(raw, known) {
 function appPattern(match) {
   var text = String(match)
   if (text.charAt(0) === "^") return text
-  return "^(" + text + ")$"
+  return "^(" + text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")$"
 }
 
 // Slot targeting is decided inside the layout callback, which is plain Lua with
@@ -1294,6 +1441,7 @@ var REGEX_MACHINERY = /[\\^$*+?()\[\]{}|]/
 
 function slotKeys(match) {
   var text = String(match)
+  if (text.charAt(0) !== "^") return text === "" ? [] : [text]
   var wrapped = /^\^\((.*)\)\$$/.exec(text)
   var inner = wrapped ? wrapped[1] : text
   if (!wrapped && REGEX_MACHINERY.test(text)) return []
@@ -1347,6 +1495,17 @@ function layoutIdForWorkspace(config, workspaceId, monitorName) {
   return profile.fallback
 }
 
+function isWorkspaceManaged(config, workspaceId, monitorName) {
+  var key = workspaceKey(workspaceId)
+  if (key === null) return false
+  if (key.indexOf("name:") !== 0) return true
+  var profile = activeProfile(config)
+  var monitor = normalizeMonitorName(monitorName)
+  if (profile.assignments && profile.assignments[key] === "hyprland") return false
+  return !!((profile.assignments && profile.assignments[key]) || profile.manageNamed
+    || (monitor && profile.monitors && profile.monitors[monitor]))
+}
+
 // Omarchy's SUPER+L writes one Lua workspace rule per workspace under
 // ~/.local/state/omarchy/workspace-layouts. The plugin's own document is a
 // separate source of truth, so those files have to be read back in or Super+L
@@ -1370,6 +1529,39 @@ function parseOmarchyToggleFiles(text) {
   return out
 }
 
+// Records contain a workspace id, a stat fingerprint, and the file's Lua text.
+function parseOmarchyToggleSnapshot(text) {
+  var out = {}
+  var records = String(text || "").split("\u001e")
+  for (var i = 0; i < records.length; i++) {
+    var fields = records[i].split("\u001f")
+    if (fields.length < 3) continue
+    var key = normalizeWorkspaceId(fields[0])
+    if (key === null || fields[1] === "") continue
+    var assignments = parseOmarchyToggleFiles(fields.slice(2).join("\u001f"))
+    for (var j = 0; j < assignments.length; j++) {
+      if (assignments[j].workspace !== key) continue
+      out[key] = { layout: assignments[j].layout, stamp: fields[1] }
+      break
+    }
+  }
+  return out
+}
+
+function omarchyToggleChanges(previous, snapshot, liveIds) {
+  var first = previous === null
+  var before = previous || {}
+  var live = liveIds || {}
+  var out = []
+  for (var key in snapshot) {
+    var record = snapshot[key]
+    if (!first && !live[key] && before[key]
+      && before[key].stamp === record.stamp && before[key].layout === record.layout) continue
+    out.push({ workspace: key, layout: record.layout, onlyBuiltins: first && !live[key] })
+  }
+  return out
+}
+
 // Write Super+L's choice into the active profile. Returns a new document when
 // something actually changed, or null when the plugin already agrees — callers
 // persist only on a real change, so a file watcher cannot loop.
@@ -1387,9 +1579,11 @@ function followOmarchyToggles(config, assignments, opts) {
     var workspace = normalizeWorkspaceId(list[i] && list[i].workspace)
     var layout = String((list[i] && list[i].layout) || "")
     if (workspace === null || !isBuiltin(layout)) continue
-    var current = layoutIdForWorkspace(draft || normalized, workspace)
+    var monitors = options.workspaceMonitors || {}
+    var current = layoutIdForWorkspace(draft || normalized, workspace, monitors[workspace])
     if (current === layout) continue
-    if (options.onlyBuiltins && !isBuiltin(current)) continue
+    var onlyBuiltins = list[i].onlyBuiltins === undefined ? options.onlyBuiltins : list[i].onlyBuiltins
+    if (onlyBuiltins && !isBuiltin(current)) continue
     if (!draft) {
       draft = JSON.parse(JSON.stringify(normalized))
       profile = activeProfile(draft)
@@ -1406,13 +1600,15 @@ function pinEntries(config) {
   var pins = (profile && profile.pins && typeof profile.pins === "object") ? profile.pins : {}
   var out = []
   for (var match in pins) {
-    out.push({
+    var entry = {
       match: match,
       workspace: pins[match].workspace,
       slots: pins[match].slots,
       name: pins[match].name || "",
       command: pins[match].command || ""
-    })
+    }
+    if (pins[match].group) entry.group = pins[match].group
+    out.push(entry)
   }
   out.sort(function(a, b) { return a.match < b.match ? -1 : (a.match > b.match ? 1 : 0) })
   return out
@@ -1490,6 +1686,7 @@ function catchEntries(config, layoutId) {
 // now — which is the whole point of a catch: it follows the shape, so moving a
 // layout to another workspace takes its apps' places with it.
 function catchesForWorkspace(config, workspaceId, monitorName) {
+  if (!isWorkspaceManaged(config, workspaceId, monitorName)) return []
   return catchEntries(config, layoutIdForWorkspace(config, workspaceId, monitorName))
 }
 
@@ -1652,7 +1849,7 @@ function searchApps(config, workspaceId, catalog, query, limit) {
 //
 // `present` maps a window class to how many of its windows are on this
 // workspace right now.
-function missingApps(config, workspaceId, catalog, present) {
+function missingApps(config, workspaceId, catalog, present, tiledPresent) {
   var pins = pinsForWorkspace(config, workspaceId)
   var list = (catalog instanceof Array) ? catalog : []
   var here = (present && typeof present === "object") ? present : {}
@@ -1674,8 +1871,12 @@ function missingApps(config, workspaceId, catalog, present) {
     // Nothing to run: the machine has no launcher for this class, and nobody
     // has told us one — which is what a hand-typed matcher usually is.
     if (command === "") continue
-    var wanted = pins[i].slots.length > 0 ? pins[i].slots.length : 1
-    var have = Number(here[pins[i].match]) || 0
+    var wanted = pins[i].group || (pins[i].slots.length > 0 ? pins[i].slots.length : 1)
+    var counts = pins[i].group && tiledPresent ? tiledPresent : here
+    var classes = slotKeys(pins[i].match)
+    if (classes.length === 0) classes = [pins[i].match]
+    var have = 0
+    for (var c = 0; c < classes.length; c++) have += Number(counts[classes[c]]) || 0
     if (have >= wanted) continue
     out.push({
       match: pins[i].match,
@@ -1768,13 +1969,13 @@ function withoutAutostart(list, workspaceId) {
 // workspace — the rule that puts each window in its place is keyed by where it
 // is going — and a workspace with nothing missing is left out, so a session
 // that came back with half its windows already open only gets the other half.
-function autostartPlan(config, catalog, windowsByWorkspace) {
+function autostartPlan(config, catalog, windowsByWorkspace, tiledByWorkspace) {
   var ids = autostartWorkspaces(config)
   var windows = (windowsByWorkspace && typeof windowsByWorkspace === "object")
     ? windowsByWorkspace : {}
   var out = []
   for (var i = 0; i < ids.length; i++) {
-    var apps = missingApps(config, ids[i], catalog, windows[ids[i]])
+    var apps = missingApps(config, ids[i], catalog, windows[ids[i]], tiledByWorkspace && tiledByWorkspace[ids[i]])
     if (apps.length === 0) continue
     out.push({ workspace: ids[i], apps: apps })
   }
@@ -1804,7 +2005,7 @@ var TERMINALS = [
 // outright and a terminal app has to be given a name of our own making. The
 // pin learns it from the window that appears, and keeps beside it the command
 // that produced it.
-function terminalClassFor(match, workspaceId) {
+function terminalClassFor(match, workspaceId, config) {
   var clean = normalizeAppMatch(match)
   // slugify() answers "layout" for nothing at all, which would be a lie here.
   var slug = clean === null ? "" : slugify(clean).replace(/[^a-z0-9]/g, "")
@@ -1814,7 +2015,12 @@ function terminalClassFor(match, workspaceId) {
   // told from the first, and the rule would send both windows to one place.
   var where = workspaceClassToken(workspaceId)
   // `ws` first because a GTK app id element may not start with a digit.
-  return "omarchy.wsl." + slug + (where === "" ? "" : ".ws" + where)
+  var base = "omarchy.wsl." + slug.slice(0, 48) + (where === "" ? "" : ".ws" + where)
+  var result = base
+  var pins = config ? activeProfile(config).pins : {}
+  var suffix = 2
+  while (pins && pins[result]) result = base + ".p" + suffix++
+  return result
 }
 
 function terminalSpec(id) {
@@ -1858,13 +2064,7 @@ function workspaceClassToken(workspaceId) {
   if (key === null) return ""
   var numeric = normalizeWorkspaceId(key)
   if (numeric !== null) return numeric
-  var out = "w"
-  for (var i = 0; i < key.length; i++) {
-    var hex = key.charCodeAt(i).toString(16)
-    while (hex.length < 4) hex = "0" + hex
-    out += hex
-  }
-  return out
+  return "n" + contentToken(key)
 }
 
 // Pair the windows that just appeared with the launches we are waiting on.
@@ -1913,14 +2113,15 @@ function matchLaunchedWindows(pending, fresh) {
   return pairs
 }
 
-// Open an app on a particular workspace, whether or not anything is pinned:
-// Hyprland's own exec takes the workspace as a rule, and `silent` keeps the
-// launch from dragging the user's view to it.
-function launchAppLua(command, workspaceId) {
+// Follow the explicit launch request once. Each resulting window opens silently,
+// so a slow app cannot reverse a workspace change the user makes afterwards.
+function launchAppLua(command, workspaceId, follow) {
   var target = normalizeWorkspaceKey(workspaceId)
   var cmd = String(command || "").replace(/[\u0000-\u001f\u007f]/g, "").trim()
   if (target === null || cmd.length === 0) return ""
-  return "hl.exec_cmd(" + luaString(cmd) + ", { workspace = " +
+  var focus = follow === true
+    ? "hl.dispatch(hl.dsp.focus({ workspace = " + luaString(target) + " }))\n" : ""
+  return focus + "hl.exec_cmd(" + luaString(cmd) + ", { workspace = " +
     luaString(target + " silent") + " })"
 }
 
@@ -1958,6 +2159,7 @@ function swappedPins(pins, workspaceId, a, b) {
     var next = { workspace: pin.workspace, slots: slots }
     if (pin.name) next.name = pin.name
     if (pin.command) next.command = pin.command
+    if (pin.group) next.group = pin.group
     out[match] = next
   }
   return out
@@ -2077,6 +2279,7 @@ function placeTreeToShape(layout, slots, pins, workspaceId) {
     }
     if (pin.name) next.name = pin.name
     if (pin.command) next.command = pin.command
+    if (pin.group) next.group = pin.group
     out[match] = next
   }
   return { weights: shape.weights, cells: shape.cells, pins: out }
@@ -2209,6 +2412,80 @@ function swappedCatches(rules, a, b) {
 
 // ------------------------------------------------------------------ capture
 
+// A Hyprland group occupies one target. Keep its members for launch counts and capture metadata.
+function tiledTargets(clients) {
+  var list = clients instanceof Array ? clients : []
+  var targets = []
+  var seen = {}
+  for (var i = 0; i < list.length; i++) {
+    var client = list[i]
+    if (!client || client.mapped === false || client.floating) continue
+    var workspace = client.workspace === undefined ? "" : workspaceKey(client.workspace)
+    if (workspace === null) continue
+    var grouped = client.grouped instanceof Array && client.grouped.length > 0
+    var members = []
+    if (grouped) {
+      var addresses = client.grouped.concat(client.address ? [client.address] : [])
+      for (var a = 0; a < addresses.length; a++) {
+        var address = String(addresses[a]).toLowerCase()
+        if (/^0x[0-9a-f]+$/.test(address) && members.indexOf(address) === -1) members.push(address)
+      }
+      members.sort()
+    }
+    var key = workspace + "\n" + (grouped && members.length ? members.join(",") : "window:" + i)
+    var target = seen[key]
+    if (!target) {
+      target = { window: client, members: [], grouped: grouped && members.length > 0 }
+      targets.push(target)
+      seen[key] = target
+    }
+    target.members.push(client)
+    if (target.window.hidden && !client.hidden) target.window = client
+  }
+  return targets
+}
+
+function clientSnapshot(clients) {
+  var list = clients instanceof Array ? clients : []
+  var windows = {}
+  var tiledWindows = {}
+  var counts = {}
+  var apps = {}
+  for (var i = 0; i < list.length; i++) {
+    var client = list[i]
+    if (!client || client.mapped === false) continue
+    var where = workspaceKey(client.workspace)
+    if (where === null) continue
+    var name = String(client.class || "").trim()
+    if (name === "") continue
+    apps[name] = true
+    if (!windows[where]) windows[where] = {}
+    windows[where][name] = (windows[where][name] || 0) + 1
+    if (!tiledWindows[where]) tiledWindows[where] = {}
+    if (!client.floating) tiledWindows[where][name] = (tiledWindows[where][name] || 0) + 1
+  }
+  var targets = tiledTargets(list)
+  for (i = 0; i < targets.length; i++) {
+    var key = workspaceKey(targets[i].window.workspace)
+    if (key !== null) counts[key] = (counts[key] || 0) + 1
+  }
+  return { counts: counts, windows: windows, tiledWindows: tiledWindows, apps: Object.keys(apps).sort() }
+}
+
+function captureClients(clients, workspace) {
+  var key = workspaceKey(workspace)
+  if (key === null) return null
+  var windows = []
+  var list = clients instanceof Array ? clients : []
+  for (var i = 0; i < list.length; i++) {
+    var client = list[i]
+    if (!client || workspaceKey(client.workspace) !== key || !client.at || !client.size) continue
+    windows.push({ class: client.class, x: client.at[0], y: client.at[1], w: client.size[0], h: client.size[1],
+      address: client.address, grouped: client.grouped, hidden: client.hidden, floating: client.floating, mapped: client.mapped })
+  }
+  return captureLayout(windows)
+}
+
 // Group windows that share a band of the main axis: the columns of a columns
 // layout, the rows of a rows layout. Two windows belong together when their
 // extents overlap by more than half of the narrower one, which is loose enough
@@ -2254,10 +2531,13 @@ function bandGroups(items, startKey, sizeKey) {
 // box of the set is taken as the screen, which drops the outer gap for free.
 function captureLayout(windows) {
   var items = []
-  var list = (windows instanceof Array) ? windows : []
+  var list = tiledTargets(windows)
+  var appearances = {}
+  var groups = {}
   var i, j
   for (i = 0; i < list.length; i++) {
-    var raw = list[i]
+    var target = list[i]
+    var raw = target.window
     if (!raw) continue
     var box = {
       match: normalizeAppMatch(raw.class),
@@ -2266,6 +2546,15 @@ function captureLayout(windows) {
     if (box.match === null) continue
     if (!isFiniteNumber(box.x) || !isFiniteNumber(box.y)) continue
     if (!isFiniteNumber(box.w) || !isFiniteNumber(box.h) || box.w <= 0 || box.h <= 0) continue
+    box.apps = []
+    var homogeneous = true
+    for (j = 0; j < target.members.length; j++) {
+      var name = normalizeAppMatch(target.members[j].class)
+      if (name !== box.match) homogeneous = false
+      if (name !== null && box.apps.indexOf(name) === -1) box.apps.push(name)
+    }
+    for (j = 0; j < box.apps.length; j++) appearances[box.apps[j]] = (appearances[box.apps[j]] || 0) + 1
+    if (target.grouped && homogeneous) groups[box.match] = target.members.length
     items.push(box)
   }
   if (items.length === 0) return null
@@ -2297,7 +2586,7 @@ function captureLayout(windows) {
     var parts = []
     for (j = 0; j < members.length; j++) {
       parts.push(extent > 0 ? members[j][crossSize] / extent * 100 : 100)
-      order.push({ slot: i, part: j, match: members[j].match })
+      order.push({ slot: i, part: j, apps: members[j].apps })
     }
     cells.push(parts)
   }
@@ -2330,15 +2619,18 @@ function captureLayout(windows) {
   for (i = 0; i < order.length; i++) {
     var place = placeOf[order[i].slot + ":" + order[i].part]
     if (place === undefined) continue
-    var key = order[i].match
-    if (!pins[key]) pins[key] = []
-    // Two windows of the same app become two places on one pin, which is what
-    // the pin was made plural for.
-    if (pins[key].indexOf(place) === -1) pins[key].push(place)
+    for (j = 0; j < order[i].apps.length; j++) {
+      var key = order[i].apps[j]
+      if (!pins[key]) pins[key] = []
+      if (pins[key].indexOf(place) === -1) pins[key].push(place)
+    }
   }
   for (var match in pins) pins[match].sort(function(a, b) { return a - b })
 
-  return { layout: layout, pins: pins }
+  for (var app in groups) {
+    if (appearances[app] !== 1 || !pins[app]) delete groups[app]
+  }
+  return { layout: layout, pins: pins, groups: groups }
 }
 
 // --------------------------------------------------------------------- lua
@@ -2377,11 +2669,14 @@ var LUA_RUNTIME = [
   '-- Added after the first release: a compositor still running the older',
   '-- runtime has a W without this table, and reload must not lose its rules.',
   'W.app_rules = W.app_rules or {}',
+  'W.owned = W.owned or {}',
+  'W.originals = W.originals or {}',
   'W.specs = {}',
   '-- workspace -> class -> the places that class wants there. Per workspace,',
   '-- because the same app pinned to slot 1 of one workspace must not claim',
   '-- slot 1 of every other workspace it happens to open on.',
   'W.slots = {}',
+  'W.groups = {}',
   '',
   '-- Named workspaces have negative ids in Hyprland. Convert the live object',
   '-- back to the same selector key used by generated W.set_slot calls.',
@@ -2397,6 +2692,70 @@ var LUA_RUNTIME = [
   '  if ok_id and id then return tostring(id) end',
   '  if ok_name and name and name ~= "" then return "name:" .. tostring(name) end',
   '  return nil',
+  'end',
+  '',
+  '-- Disable the old follow hook during a live upgrade.',
+  'W.follow_window = function() end',
+  '',
+  'local function compatible_group(group, class)',
+  '  if not group then return true end',
+  '  if group.locked or group.denied then return false end',
+  '  for _, member in ipairs(group.members or {}) do',
+  '    if member.class ~= class then return false end',
+  '  end',
+  '  return true',
+  'end',
+  '',
+  'function W.group_app(ws, class)',
+  '  if not W.groups[ws] or not W.groups[ws][class] or W.grouping then return end',
+  '  if not hl.dsp.group or type(hl.dsp.group.toggle) ~= "function" then return end',
+  '  W.grouping = true',
+  '  local ok, err = pcall(function()',
+  '    local windows, group = {}, nil',
+  '    for _, win in ipairs(hl.get_windows({ class = class })) do',
+  '      if win.mapped and not win.floating and workspace_key(win.workspace) == ws',
+  '          and compatible_group(win.group, class) then',
+  '        windows[#windows + 1] = win',
+  '        if win.group then group = win.group end',
+  '      end',
+  '    end',
+  '    if #windows == 0 then return end',
+  '    if not group then',
+  '      hl.dispatch(hl.dsp.group.toggle({ window = windows[1] }))',
+  '      group = windows[1].group',
+  '    end',
+  '    if not group or type(group.add) ~= "function" then return end',
+  '    for _, win in ipairs(windows) do',
+  '      if win.group ~= group then group:add(win) end',
+  '    end',
+  '  end)',
+  '  W.grouping = false',
+  '  if not ok then error(err, 0) end',
+  'end',
+  '',
+  'function W.set_group(ws, class)',
+  '  W.groups[ws] = W.groups[ws] or {}',
+  '  W.groups[ws][class] = true',
+  'end',
+  '',
+  'function W.restore_groups()',
+  '  for ws, classes in pairs(W.groups) do',
+  '    for class in pairs(classes) do W.group_app(ws, class) end',
+  '  end',
+  'end',
+  '',
+  'function W.start_groups()',
+  '  for _, subscription in ipairs(W.group_subscriptions or {}) do',
+  '    pcall(function() subscription:remove() end)',
+  '  end',
+  '  W.group_subscriptions = {}',
+  '  if next(W.groups) and type(hl.on) == "function" then',
+  '    local function opened(win)',
+  '      if win and win.workspace then W.group_app(workspace_key(win.workspace), win.class) end',
+  '    end',
+  '    W.group_subscriptions = { hl.on("window.open", opened), hl.on("window.class", opened) }',
+  '  end',
+  '  W.restore_groups()',
   'end',
   '',
   'local function normalize(weights)',
@@ -2666,8 +3025,52 @@ var LUA_RUNTIME = [
   '-- Workspace rules are keyed by selector. Reissuing the same selector updates',
   '-- the existing rule in place, preserving fields such as monitor, persistent,',
   '-- and enabled.',
+  'local function live_workspace(ws)',
+  '  local ok, live = pcall(function() return hl.get_workspace(ws) end)',
+  '  return ok and live or nil',
+  'end',
+  '',
+  'function W.begin_workspaces()',
+  '  W.seen = {}',
+  'end',
+  '',
   'function W.set_workspace(ws, layout)',
+  '  W.seen = W.seen or {}',
+  '  W.seen[ws] = true',
+  '  if ws:sub(1, 5) == "name:" then',
+  '    local live = live_workspace(ws)',
+  '    local saved = live and W.originals[live.id] or nil',
+  '    local old = W.owned[ws]',
+  '    local original = saved and saved.workspace == live and saved.layout',
+  '      or (old and old.previous) or (live and live.tiled_layout)',
+  '    if not original then',
+  '      local ok, fallback = pcall(function() return hl.get_config("general.layout") end)',
+  '      original = ok and fallback or "dwindle"',
+  '    end',
+  '    W.owned[ws] = { layout = layout, previous = original, workspace = live }',
+  '    if live then W.originals[live.id] = { workspace = live, layout = original } end',
+  '  end',
   '  W.rules[ws] = hl.workspace_rule({ workspace = ws, layout = layout })',
+  'end',
+  '',
+  'function W.finish_workspaces()',
+  '  for ws, owned in pairs(W.owned) do',
+  '    if not W.seen[ws] then',
+  '      local live = live_workspace(ws)',
+  '      if not live or live.tiled_layout == owned.layout then',
+  '        hl.workspace_rule({ workspace = ws, layout = owned.previous })',
+  '      end',
+  '      W.owned[ws] = nil',
+  '      W.rules[ws] = nil',
+  '    end',
+  '  end',
+  '  for id, original in pairs(W.originals) do',
+  '    local claimed = false',
+  '    for _, owned in pairs(W.owned) do',
+  '      if owned.workspace == original.workspace then claimed = true; break end',
+  '    end',
+  '    if not claimed then W.originals[id] = nil end',
+  '  end',
   'end',
   '',
   '-- App pins, as window rules. Unlike a workspace rule there is no fixed set',
@@ -2681,8 +3084,7 @@ var LUA_RUNTIME = [
   '  W.app_rules = {}',
   'end',
   '',
-  '-- `silent` keeps a window that opens while you are elsewhere from dragging',
-  '-- your view to its workspace, which is the whole point of pinning it there.',
+  '-- Window rules place apps silently. An explicit launch can focus its workspace first.',
   'function W.set_slot(ws, class, slots)',
   '  if not W.slots[ws] then W.slots[ws] = {} end',
   '  W.slots[ws][class] = slots',
@@ -2700,7 +3102,13 @@ var LUA_RUNTIME = [
   '-- active layout to lay itself out again. Errors on a workspace running a',
   '-- built-in layout, which has no idea what this message means.',
   'function W.relayout()',
-  '  pcall(function() hl.dispatch(hl.dsp.layout("relayout")) end)',
+  '  pcall(function()',
+  '    local ws = hl.get_active_workspace()',
+  '    local layout = ws and ws.tiled_layout or ""',
+  '    if layout:sub(1, 16) == "lua:omarchy-wsl-" then',
+  '      hl.dispatch(hl.dsp.layout("relayout"))',
+  '    end',
+  '  end)',
   'end'
 ].join("\n")
 
@@ -2800,7 +3208,9 @@ function generateLua(config, liveWorkspaceIds, workspaceMonitors) {
 
   var workspaces = managedWorkspaceIds(normalized, liveWorkspaceIds)
   var screens = (workspaceMonitors && typeof workspaceMonitors === "object") ? workspaceMonitors : {}
+  lines.push("W.begin_workspaces()")
   for (i = 0; i < workspaces.length; i++) {
+    if (!isWorkspaceManaged(normalized, workspaces[i], screens[workspaces[i]])) continue
     // Resolved per workspace with the monitor it is on right now: a monitor
     // default is a property of where the workspace *is*, so the file is
     // rewritten when workspaces move between screens.
@@ -2821,6 +3231,7 @@ function generateLua(config, liveWorkspaceIds, workspaceMonitors) {
       }
     }
   }
+  lines.push("W.finish_workspaces()")
   lines.push("")
 
   // Emitted unconditionally: with no pins left this is the line that takes the
@@ -2830,6 +3241,10 @@ function generateLua(config, liveWorkspaceIds, workspaceMonitors) {
   for (i = 0; i < pins.length; i++) {
     lines.push("W.set_app(" + luaString(pins[i].match) + ", " +
       luaString(appPattern(pins[i].match)) + ", " + luaString(pins[i].workspace) + ")")
+    var groupClasses = slotKeys(pins[i].match)
+    if (pins[i].group && groupClasses.length === 1) {
+      lines.push("W.set_group(" + luaString(pins[i].workspace) + ", " + luaString(groupClasses[0]) + ")")
+    }
     if (pins[i].slots.length === 0) continue
     // The layout callback compares classes literally, so a match it cannot
     // reduce to plain class names keeps its workspace and loses its slots.
@@ -2841,6 +3256,8 @@ function generateLua(config, liveWorkspaceIds, workspaceMonitors) {
         luaString(keys[j]) + ", { " + wanted.join(", ") + " })")
     }
   }
+  lines.push("W.start_groups()")
+  lines.push("W.relayout()")
   lines.push("")
   return lines.join("\n")
 }
@@ -2890,6 +3307,169 @@ function gatherAppLua(match, workspaceId) {
     "{ workspace = " + luaString(target) + ", window = windows[i], follow = false })) end)",
     "    end",
     "  end",
+    "end",
+    "local W = _G.__omarchy_wsl",
+    "if W and W.restore_groups then W.restore_groups() end"
+  ].join("\n")
+}
+
+function ungroupAppLua(match, workspaceId) {
+  var target = workspaceKey(workspaceId)
+  var classes = slotKeys(match)
+  if (target === null || classes.length !== 1) return ""
+  return [
+    "local seen = {}",
+    "for _, win in ipairs(hl.get_windows({ class = " + luaString(classes[0]) + " })) do",
+    "  local ws = win.workspace",
+    "  local key = ws and (ws.id < 0 and ('name:' .. ws.name) or tostring(ws.id))",
+    "  local group = win.group",
+    "  if key == " + luaString(target) + " and group then",
+    "    local mixed, done = false, false",
+    "    for _, old in ipairs(seen) do if old == group then done = true end end",
+    "    for _, member in ipairs(group.members) do",
+    "      if member.class ~= " + luaString(classes[0]) + " then mixed = true end",
+    "    end",
+    "    if not mixed and not done then",
+    "      seen[#seen + 1] = group",
+    "      hl.dispatch(hl.dsp.group.toggle({ window = win }))",
+    "    end",
+    "  end",
+    "end"
+  ].join("\n")
+}
+
+// ------------------------------------------------- swapping workspace numbers
+//
+// Two workspaces trade numbers. Hyprland's `change_id` renumbers the workspace
+// object, so its windows and tiling tree come along; this side moves what the
+// active profile keeps by number — the layout each was given, the apps pinned
+// there and the `at login` mark. Layouts, monitor defaults and catches are not
+// keyed by workspace, and other profiles are not in play, so none of those
+// change. Null when nothing in the document would move, which is how every
+// other "maybe edit" in this file answers.
+function swappedWorkspaces(config, a, b, profileName) {
+  var from = normalizeWorkspaceId(a)
+  var to = normalizeWorkspaceId(b)
+  if (from === null || to === null || from === to) return null
+  var draft = normalizeConfig(config)
+  var profile = profileName === undefined ? activeProfile(draft) : findProfile(draft, profileName)
+  if (!profile) return null
+  var changed = false
+  if (profile.assignments[from] !== profile.assignments[to]) {
+    profile.assignments = exchangedKeys(profile.assignments, from, to)
+    changed = true
+  }
+  for (var match in profile.pins) {
+    var pin = profile.pins[match]
+    if (pin.workspace !== from && pin.workspace !== to) continue
+    pin.workspace = otherEnd(pin.workspace, from, to)
+    changed = true
+  }
+  var fromAtLogin = profile.autostart.indexOf(from) !== -1
+  var toAtLogin = profile.autostart.indexOf(to) !== -1
+  if (fromAtLogin !== toAtLogin) {
+    profile.autostart = normalizeAutostart(profile.autostart.map(function(id) {
+      return otherEnd(id, from, to)
+    }))
+    changed = true
+  }
+  return changed ? draft : null
+}
+
+// The other end of a swap: a key that is one of the two becomes the other.
+function otherEnd(key, a, b) {
+  return key === a ? b : (key === b ? a : key)
+}
+
+// Two keys of a map trade places. An absent key stays absent, so a workspace
+// with no entry does not gain one.
+function exchangedKeys(map, a, b) {
+  var out = {}
+  for (var key in map) out[otherEnd(key, a, b)] = map[key]
+  return out
+}
+
+// The live half of a swap, for `hyprctl eval`. Self-contained like
+// gatherAppLua: it must run on a session whose generated file predates it.
+//
+// Workspace rules are keyed by number and re-apply the moment a workspace
+// arrives at a new one, so a workspace that simply moved would be re-tiled
+// into whatever layout its new number had, and a tree that passes through a
+// foreign layout comes back rearranged. Each destination — the spare number
+// included — is therefore given the arriving workspace's own layout *before*
+// the move. The sync that follows the document swap reissues the same rules,
+// which updates them in place and re-tiles nothing.
+//
+// A `change_id` onto a number that is taken only warns, so the outcome is
+// checked at the end rather than trusted. Nothing here disables a rule: a
+// rule is one object per number, and disabling it is not undone by reissuing.
+// Neither workspace live is not an error — the document half still applies.
+//
+// With one workspace live, the other is made to exist first, with a
+// `persistent` rule that is lifted again once it has moved, and the swap is
+// then the same two-workspace exchange. A plain renumbering is announced in
+// no way Quickshell understands, so the shell would keep showing the old
+// number; a workspace being created and an empty one being destroyed are
+// ordinary events, and it follows both.
+function swapWorkspacesLua(a, b) {
+  var from = normalizeWorkspaceId(a)
+  var to = normalizeWorkspaceId(b)
+  if (from === null || to === null || from === to) return ""
+  var pair = "workspaces " + from + " and " + to
+  return [
+    'if type(hl.dsp.workspace.change_id) ~= "function" then',
+    '  error("swapping ' + pair + ' needs Hyprland 0.56 or newer", 0)',
+    "end",
+    "local first, second = hl.get_workspace(" + from + "), hl.get_workspace(" + to + ")",
+    "local function park(id, layout)",
+    "  hl.workspace_rule({ workspace = tostring(id), layout = layout })",
+    "end",
+    "local function move(ws, id)",
+    "  hl.dispatch(hl.dsp.workspace.change_id({ workspace = ws, id = id }))",
+    "end",
+    "local function summon(id, layout)",
+    "  hl.workspace_rule({ workspace = tostring(id), layout = layout, persistent = true })",
+    // A rule takes effect on the compositor's next scheduled pass, which is
+    // after this evaluation returns; asking for it now is what makes the
+    // workspace exist in time to be swapped.
+    "  hl.exec_scheduled_prop_refresh_immediately()",
+    "  local ws = hl.get_workspace(id)",
+    "  if not ws then",
+    "    hl.workspace_rule({ workspace = tostring(id), layout = layout, persistent = false })",
+    '    error("workspace " .. id .. " could not be created", 0)',
+    "  end",
+    "  return ws",
+    "end",
+    "local made = nil",
+    "if first and not second then",
+    "  second = summon(" + to + ", first.tiled_layout)",
+    "  made = " + to,
+    "elseif second and not first then",
+    "  first = summon(" + from + ", second.tiled_layout)",
+    "  made = " + from,
+    "end",
+    "if first and second then",
+    "  local used = {}",
+    "  for _, ws in pairs(hl.get_workspaces()) do used[ws.id] = true end",
+    "  local spare = 2147483647",
+    "  while used[spare] do spare = spare - 1 end",
+    "  local first_layout, second_layout = first.tiled_layout, second.tiled_layout",
+    "  park(spare, first_layout)",
+    "  move(first, spare)",
+    "  park(" + from + ", second_layout)",
+    "  move(second, " + from + ")",
+    "  park(" + to + ", first_layout)",
+    "  move(first, " + to + ")",
+    "end",
+    // Persistence was set on the summoned number, where the live workspace
+    // now sits; the empty one has the vacated number and nothing keeping it.
+    "if made then",
+    "  local ws = hl.get_workspace(made)",
+    "  hl.workspace_rule({ workspace = tostring(made), layout = ws and ws.tiled_layout or nil, persistent = false })",
+    "end",
+    "if (first and hl.get_workspace(" + to + ") ~= first)",
+    "    or (second and hl.get_workspace(" + from + ") ~= second) then",
+    '  error("' + pair + ' did not swap", 0)',
     "end"
   ].join("\n")
 }
@@ -2906,14 +3486,15 @@ function statusLine(config, workspaceId, monitorName) {
   var id = layoutIdForWorkspace(config, key, monitorName)
   var layout = findLayout(config, id)
   var monitor = normalizeMonitorName(monitorName)
+  var managed = isWorkspaceManaged(config, key, monitorName)
 
   var source = "profile default"
   if (profile.assignments[key]) source = "workspace"
   else if (monitor !== null && profile.monitors[monitor]) source = "monitor " + monitor
 
   var parts = ["workspace " + workspaceLabel(key)]
-  parts.push(layout ? layout.name + " (" + describeLayout(layout) + ")" : "Hyprland " + id)
-  parts.push("from " + source)
+  parts.push(managed ? (layout ? layout.name + " (" + describeLayout(layout) + ")" : "Hyprland " + id) : "Hyprland layout")
+  parts.push("from " + (managed ? source : "Hyprland"))
   parts.push("profile " + profile.name)
 
   var pins = pinsForWorkspace(config, key)
@@ -2951,14 +3532,16 @@ function stateJson(config, workspaceMonitors, liveWorkspaceIds) {
 
   var workspaces = []
   for (i = 0; i < ids.length; i++) {
-    var id = layoutIdForWorkspace(normalized, ids[i], screens[ids[i]])
+    var managed = isWorkspaceManaged(normalized, ids[i], screens[ids[i]])
+    var id = managed ? layoutIdForWorkspace(normalized, ids[i], screens[ids[i]]) : null
     var layout = findLayout(normalized, id)
     workspaces.push({
       workspace: normalizeWorkspaceId(ids[i]) === null ? ids[i] : Number(ids[i]),
       monitor: screens[ids[i]] || "",
       layout: id,
-      name: layout ? layout.name : id,
-      builtin: isBuiltin(id),
+      name: layout ? layout.name : (id || "Hyprland"),
+      managed: managed,
+      builtin: !managed || isBuiltin(id),
       places: layout ? totalCells(layout.cells) : 0,
       autostart: isAutostart(normalized, ids[i])
     })
@@ -3011,6 +3594,33 @@ function parseSlots(text) {
 
 function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'"
+}
+
+// Compare the exact UTF-8 document read by each panel before it changes the compositor.
+function contentToken(text) {
+  var bytes = unescape(encodeURIComponent(String(text)))
+  var hash = 2166136261
+  for (var i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes.charCodeAt(i), 16777619)
+  var hex = (hash >>> 0).toString(16)
+  return ("00000000" + hex).slice(-8)
+}
+
+function guardConfigLua(lua, path, token) {
+  if (!token) return lua
+  return [
+    "local source, message, code = io.open(" + luaString(path) + ", 'rb')",
+    "if not source and code ~= 2 then error(message or 'Cannot read the layout config', 0) end",
+    "local expected = " + luaString(token),
+    "local actual = 'missing'",
+    "if source then",
+    "  local text = source:read('*a'); source:close()",
+    "  local hash = 2166136261",
+    "  for i = 1, #text do hash = ((hash ~ text:byte(i)) * 16777619) & 0xffffffff end",
+    "  actual = string.format('%08x', hash)",
+    "end",
+    "if actual ~= expected then error('The layout config changed. Retry the operation.', 0) end",
+    lua
+  ].join("\n")
 }
 
 // hyprctl parses an argument that starts with "-" as a flag, and Lua comments
@@ -3113,22 +3723,37 @@ if (typeof module !== "undefined") {
     normalizeMonitorName: normalizeMonitorName,
     normalizeWorkspaceKey: normalizeWorkspaceKey,
     workspaceKey: normalizeWorkspaceKey,
+    workspaceSnapshot: workspaceSnapshot,
+    workspaceRenames: workspaceRenames,
+    uniqueWorkspaceNames: uniqueWorkspaceNames,
+    renamedWorkspaces: renamedWorkspaces,
     workspaceLabel: workspaceLabel,
     findLayout: findLayout,
     findProfile: findProfile,
     activeProfile: activeProfile,
     layoutIdForWorkspace: layoutIdForWorkspace,
+    isWorkspaceManaged: isWorkspaceManaged,
     parseOmarchyToggleLua: parseOmarchyToggleLua,
     parseOmarchyToggleFiles: parseOmarchyToggleFiles,
+    parseOmarchyToggleSnapshot: parseOmarchyToggleSnapshot,
+    omarchyToggleChanges: omarchyToggleChanges,
     followOmarchyToggles: followOmarchyToggles,
     normalizeAppMatch: normalizeAppMatch,
     normalizePin: normalizePin,
+    normalizeGroup: normalizeGroup,
+    MAX_GROUP_WINDOWS: MAX_GROUP_WINDOWS,
+    MAX_COMMAND_LENGTH: MAX_COMMAND_LENGTH,
+    pinEditorError: pinEditorError,
+    editedPin: editedPin,
     slotKeys: slotKeys,
     slotApps: slotApps,
     swappedPins: swappedPins,
     dropDirections: dropDirections,
     movePlaceInto: movePlaceInto,
     captureLayout: captureLayout,
+    tiledTargets: tiledTargets,
+    clientSnapshot: clientSnapshot,
+    captureClients: captureClients,
     appPattern: appPattern,
     pinEntries: pinEntries,
     normalizeCatch: normalizeCatch,
@@ -3156,6 +3781,9 @@ if (typeof module !== "undefined") {
     launchToken: launchToken,
     matchLaunchedWindows: matchLaunchedWindows,
     gatherAppLua: gatherAppLua,
+    ungroupAppLua: ungroupAppLua,
+    swappedWorkspaces: swappedWorkspaces,
+    swapWorkspacesLua: swapWorkspacesLua,
     uniqueProfileName: uniqueProfileName,
     luaLayoutName: luaLayoutName,
     luaLayoutRef: luaLayoutRef,
@@ -3164,6 +3792,8 @@ if (typeof module !== "undefined") {
     generateLua: generateLua,
     livePreviewLua: livePreviewLua,
     shellQuote: shellQuote,
+    contentToken: contentToken,
+    guardConfigLua: guardConfigLua,
     evalPayload: evalPayload,
     hyprctlEvalArgs: hyprctlEvalArgs,
     focusWorkspaceCommand: focusWorkspaceCommand,
