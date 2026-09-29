@@ -45,6 +45,163 @@ const luaAvailable = (() => {
   return !probe.error && probe.status === 0
 })()
 
+test("Tabbed is available in existing libraries without replacing layouts or assignments", () => {
+  const config = Model.normalizeConfig({
+    layouts: [{ id: "custom", weights: [70, 30] }],
+    profiles: [{ name: "work", assignments: { 2: "custom", 5: "tabbed" } }]
+  })
+  assert.deepEqual(config.profiles[0].assignments, { 2: "custom", 5: "tabbed" })
+  assert.deepEqual(config.layouts[0].weights, [70, 30])
+  assert.equal(Model.findLayout(config, "tabbed").kind, "tabbed")
+  assert.deepEqual(Model.normalizeConfig(config), config)
+  const collision = Model.normalizeConfig({ layouts: [{ id: "tabbed", weights: [60, 40] }] })
+  assert.equal(Model.findLayout(collision, "tabbed").kind, "ratio")
+  const layout = Model.normalizeLayout({ kind: "tabbed", weights: [50, 50], cells: [2, 2] })
+  assert.deepEqual(layout.weights, [100])
+  assert.deepEqual(layout.cells, [[100]])
+  assert.equal(Model.describeLayout(layout), "one tab group")
+})
+
+// Groups expose read-only properties in Hyprland. Adding a grouped window merges
+// its entire source group and changes the current tab, just as the compositor does.
+function tabbedPrelude() {
+  return `${lua_prelude()}
+local windows, workspaces, callbacks, timers = {}, {}, {}, {}
+local focused, additions = nil, 0
+local function window(class, ws, floating)
+  local win = { class = class, workspace = ws, mapped = true, floating = floating }
+  windows[#windows + 1] = win
+  return win
+end
+local function group(members, locked, denied)
+  local data = { members = members, locked = locked, denied = denied, current = members[1] }
+  local g
+  data.add = function(self, win)
+    if win.barred then error("window cannot be added to group") end
+    local source = win.group and win.group.members or { win }
+    for _, member in ipairs(source) do
+      member.group = self
+      table.insert(data.members, member)
+      data.current = member
+      additions = additions + 1
+    end
+    -- Membership changes can re-enter a layout callback.
+    if _G.__omarchy_wsl then _G.__omarchy_wsl.schedule_tabbed() end
+  end
+  g = setmetatable({}, { __index = data, __newindex = function() error("read-only group") end })
+  for _, win in ipairs(members) do win.group = g end
+  return g, data
+end
+hl.get_workspace = function(key) return workspaces[key] end
+hl.get_windows = function() return windows end
+hl.get_active_window = function() return focused end
+hl.dsp.group = {
+  toggle = function(args) return function() group({ args.window }) end end,
+  active = function(args) return function()
+    getmetatable(args.window.group).__index.current = args.window.group.members[args.index]
+  end end
+}
+hl.dispatch = function(action) action() end
+hl.timer = function(callback)
+  timers[#timers + 1] = callback
+  return {}
+end
+hl.on = function(event, callback)
+  callbacks[event] = callback
+  return { remove = function() callbacks[event] = nil end }
+end
+local function flush()
+  local pending = timers
+  timers = {}
+  for _, callback in ipairs(pending) do callback() end
+end
+local tabbed = { id = 5, name = "5", tiled_layout = "lua:omarchy-wsl-tabbed" }
+local normal = { id = 2, name = "2", tiled_layout = "dwindle" }
+workspaces["5"], workspaces["2"] = tabbed, normal
+${Model.LUA_RUNTIME}
+${Model.layoutSpecLua({ id: "tabbed", kind: "tabbed" })}
+`
+}
+
+test("a tabbed workspace merges different apps and groups, preserves focus and leaves exceptions alone",
+  { skip: !luaAvailable }, () => {
+    runLua(`${tabbedPrelude()}
+local a, b = window("mail", tabbed), window("browser", tabbed)
+local c, d = window("editor", tabbed), window("terminal", tabbed)
+local first = group({ a, b })
+group({ c, d })
+local dialog = window("dialog", tabbed, true)
+local barred = window("barred", tabbed)
+barred.barred = true
+local later = window("later", tabbed)
+local elsewhere = window("mail", normal)
+local locked = window("locked", tabbed)
+local protected = group({ locked }, true)
+local denied = window("denied", tabbed)
+group({ denied }, false, true)
+focused = b
+W.set_group("5", "mail")
+W.restore_groups()
+assert(a.group == first and b.group == first and c.group == first and d.group == first)
+assert(#first.members == 5 and later.group == first and not barred.group)
+assert(first.current == b and focused == b)
+assert(not dialog.group and not elsewhere.group and locked.group == protected)
+assert(denied.group ~= first)
+assert(#timers == 0, "grouping must not schedule itself recursively")
+local before = additions
+W.restore_groups()
+assert(additions == before, "reapplying must be idempotent")
+`)
+  })
+
+test("tabbed reconciliation is deferred, follows opens and moves, and stops when the layout changes",
+  { skip: !luaAvailable }, () => {
+    runLua(`${tabbedPrelude()}
+local a = window("mail", tabbed)
+focused = a
+W.start_groups()
+assert(a.group and #a.group.members == 1)
+local b = window("browser", tabbed)
+callbacks["window.open"](b)
+callbacks["window.class"](b)
+assert(not b.group and #timers == 1)
+flush()
+assert(b.group == a.group and a.group.current == a)
+local c = window("editor", normal)
+c.workspace = tabbed
+callbacks["window.move_to_workspace"](c)
+flush()
+assert(c.group == a.group)
+tabbed.tiled_layout = "dwindle"
+local d = window("terminal", tabbed)
+callbacks["window.open"](d)
+flush()
+assert(not d.group, "leaving Tabbed stops automatic grouping")
+assert(#a.group.members == 3, "switching layouts preserves existing groups")
+-- A pending callback resolves the current layout rather than a stale assignment.
+tabbed.tiled_layout = "lua:omarchy-wsl-tabbed"
+callbacks["window.open"](d)
+tabbed.tiled_layout = "dwindle"
+flush()
+assert(not d.group)
+W.start_groups()
+assert(callbacks["window.open"] and callbacks["window.move_to_workspace"])
+`)
+  })
+
+test("tabbed layouts reconcile named workspaces without taking background focus",
+  { skip: !luaAvailable }, () => {
+    runLua(`${tabbedPrelude()}
+local named = { id = -1337, name = "chat", tiled_layout = "lua:omarchy-wsl-tabbed" }
+workspaces["name:chat"] = named
+local a, b = window("mail", named), window("browser", named)
+focused = window("editor", normal)
+W.restore_groups()
+assert(a.group == b.group and #a.group.members == 2)
+assert(focused.workspace == normal)
+`)
+  })
+
 // --------------------------------------------------------------- weights
 
 test("weights are stored as percentages so a weight is readable on its own", () => {

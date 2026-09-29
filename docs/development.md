@@ -296,6 +296,21 @@ last unambiguous identity map.
 
 ## App launches and tab groups
 
+The `tabbed` layout kind is a workspace-wide grouping policy. Geometry still
+operates on Hyprland targets: normally one group fills the area, while protected
+groups or windows refused by Hyprland get separate non-overlapping places.
+`W.restore_tabbed` resolves the live Lua `tiled_layout`, so a delayed callback
+cannot group a workspace that has since changed layouts. It takes precedence
+over per-app restoration on that workspace, allowing mixed-class tabs.
+
+Recalculation only schedules a one-shot callback: changing group membership
+inside `recalculate` would re-enter the layout. Opens and workspace moves also
+schedule reconciliation, covering fullscreen and background workspaces. Reapply
+replaces event subscriptions; pending callbacks read the latest specs. Group
+properties are read-only: restore the selected member with `group.active`, not
+by assigning `group.current`. Leaving Tabbed stops collecting windows but does
+not dissolve a user's group.
+
 Follow applies to an explicit panel or CLI request once. Every resulting window
 uses silent placement. Login and unrelated launches cannot consume a focus exemption.
 The runtime disables the old follow callback during an upgrade.
