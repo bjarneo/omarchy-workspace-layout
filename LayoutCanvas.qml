@@ -52,7 +52,7 @@ Item {
   signal placeDropped(int from, int to, string edge)
 
   readonly property var spec: Model.normalizeLayout(root.layout)
-  readonly property bool isRatio: spec.kind !== "grid"
+  readonly property bool isRatio: spec.kind === "ratio"
   readonly property bool horizontal: spec.orientation !== "rows"
   readonly property int slotCount: spec.weights.length
 

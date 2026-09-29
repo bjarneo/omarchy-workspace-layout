@@ -142,7 +142,7 @@ Panel {
     }
     if (menuSlot < 1) return out
     var layout = selectedLayout
-    if (layout && layout.kind !== "grid") {
+    if (layout && layout.kind === "ratio") {
       var at = slotPosition(menuSlot)
       var room = Model.totalCells(layout.cells) < Model.MAX_SLOTS
       // Named by what the user will see rather than by the layout's grain: in
@@ -272,7 +272,7 @@ Panel {
   // because a grown shape has more places than weights and `ratioRects` reads
   // that as a deliberate split.
   readonly property bool canKeepOverflowPlaces: selectedLayout !== null
-    && selectedLayout.kind !== "grid"
+    && selectedLayout.kind === "ratio"
     && selectedWindowCount > Model.totalCells(selectedLayout.cells)
     && Model.totalCells(selectedLayout.cells) < Model.MAX_SLOTS
 
@@ -516,7 +516,7 @@ Panel {
   }
 
   function editSelectedLayout(change) {
-    if (!selectedLayout) return
+    if (!selectedLayout || selectedLayout.kind === "tabbed") return
     var sourceId = selectedLayout.id
     store.mutate(function(draft) {
       var id = root.forkPreset(draft, sourceId)
@@ -2102,7 +2102,7 @@ Panel {
               height: Math.min(Style.space(200), Math.round(width / root.screenAspect))
               layout: root.selectedLayout
               windowCount: root.selectedWindowCount
-              editable: root.selectedLayout !== null && root.selectedLayout.kind !== "grid"
+              editable: root.selectedLayout !== null && root.selectedLayout.kind === "ratio"
               selectedSlot: root.selectedSlot
               slotApps: root.slotApps
               foreground: root.fg
@@ -2171,6 +2171,7 @@ Panel {
               textFormat: Text.PlainText
               text: {
                 if (!root.selectedLayout) return ""
+                if (root.selectedLayout.kind === "tabbed") return "One tab group · new tiled windows join automatically"
                 var windows = root.selectedWindowCount
                 var parts = [
                   Model.describeLayout(root.selectedLayout),
@@ -2194,7 +2195,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.spacing.sm
-            visible: root.selectedLayout !== null
+            visible: root.selectedLayout !== null && root.selectedLayout.kind !== "tabbed"
 
             Row {
               spacing: Style.spacing.sm

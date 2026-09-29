@@ -52,4 +52,20 @@ Item {
       border.color: Util.alpha(root.stroke, (root.filled ? 0.9 : 0.8) * root.strength)
     }
   }
+
+  // The header distinguishes one tab group from an ordinary one-slot layout.
+  Row {
+    visible: root.spec.kind === "tabbed"
+    x: root.hairline * 2
+    y: root.hairline * 2
+    spacing: root.hairline
+    Repeater {
+      model: 3
+      Rectangle {
+        width: Math.max(1, (root.width - root.hairline * 7) / 3)
+        height: Math.max(root.hairline, root.height * 0.16)
+        color: Util.alpha(root.stroke, 0.8 * root.strength)
+      }
+    }
+  }
 }
