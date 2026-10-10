@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Hyprland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -1809,8 +1810,8 @@ Panel {
 
   // ------------------------------------------------------------------- view
 
-  readonly property color fg: Color.popups.text
-  readonly property color accent: Color.accent
+  readonly property color fg: Commons.Color.popups.text
+  readonly property color accent: Commons.Color.accent
 
   KeyboardPanel {
     id: panel
@@ -1866,7 +1867,7 @@ Panel {
         width: Math.min(parent.width, Style.space(220))
         height: Math.min(parent.height, menuColumn.implicitHeight + Style.spacing.xs * 2)
         radius: Style.cornerRadius
-        color: Color.popups.background
+        color: Commons.Color.popups.background
         border.width: 1
         border.color: Util.alpha(root.fg, 0.25)
 
@@ -1994,7 +1995,7 @@ Panel {
             visible: message !== ""
             text: message
             textFormat: Text.PlainText
-            color: !store.ready && store.lastError === "" || sync.swapping ? root.fg : Color.urgent
+            color: !store.ready && store.lastError === "" || sync.swapping ? root.fg : Commons.Color.urgent
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             wrapMode: Text.WrapAnywhere
@@ -2551,13 +2552,13 @@ Panel {
                     width: Style.space(18)
                     height: Style.space(18)
                     radius: Style.cornerRadius
-                    color: releaseHover.hovered ? Util.alpha(Color.urgent, 0.25) : "transparent"
+                    color: releaseHover.hovered ? Util.alpha(Commons.Color.urgent, 0.25) : "transparent"
 
                     Text {
                       anchors.centerIn: parent
                       textFormat: Text.PlainText
                       text: "\u2715"
-                      color: releaseHover.hovered ? Color.urgent : Util.alpha(root.fg, 0.5)
+                      color: releaseHover.hovered ? Commons.Color.urgent : Util.alpha(root.fg, 0.5)
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
                     }
@@ -2707,7 +2708,7 @@ Panel {
               PanelActionButton {
                 enabled: root.selectedLayout !== null && root.layouts.length > 1
                 foreground: root.fg
-                hoverColor: Color.urgent
+                hoverColor: Commons.Color.urgent
                 iconText: root.armedDelete === ("layout:" + root.selectedLayoutId) ? "!" : "󰩹"
                 tooltipText: root.armedDelete === ("layout:" + root.selectedLayoutId)
                   ? "Click again to delete " + (root.selectedLayout ? root.selectedLayout.name : "")
@@ -2890,7 +2891,7 @@ Panel {
               PanelActionButton {
                 enabled: root.config && root.config.profiles.length > 1
                 foreground: root.fg
-                hoverColor: Color.urgent
+                hoverColor: Commons.Color.urgent
                 iconText: root.armedDelete === ("profile:" + root.activeProfileName) ? "!" : "󰩹"
                 tooltipText: root.armedDelete === ("profile:" + root.activeProfileName)
                   ? "Click again to delete " + root.activeProfileName
@@ -2952,8 +2953,8 @@ Panel {
             Button {
               id: restoreButton
               anchors.right: parent.right
-              foreground: root.armedRestore ? Color.urgent : Util.alpha(root.fg, 0.55)
-              accent: root.armedRestore ? Color.urgent : root.accent
+              foreground: root.armedRestore ? Commons.Color.urgent : Util.alpha(root.fg, 0.55)
+              accent: root.armedRestore ? Commons.Color.urgent : root.accent
               bordered: root.armedRestore
               fontSize: Style.font.caption
               verticalPadding: Style.spacing.xs

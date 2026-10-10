@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -7,8 +8,8 @@ Column {
   id: root
 
   property var config: null
-  property color foreground: Color.popups.text
-  property color accent: Color.accent
+  property color foreground: Commons.Color.popups.text
+  property color accent: Commons.Color.accent
   property bool opened: false
   property string original: ""
   property string workspace: ""
@@ -155,7 +156,7 @@ Column {
     visible: root.error !== ""
     text: root.error
     textFormat: Text.PlainText
-    color: Color.urgent
+    color: Commons.Color.urgent
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
     wrapMode: Text.WordWrap

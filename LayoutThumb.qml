@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 
 // A layout at chip size: no labels, no handles, just the shape. Used in the
@@ -9,7 +10,7 @@ Item {
   id: root
 
   property var layout: null
-  property color stroke: Color.popups.text
+  property color stroke: Commons.Color.popups.text
   property real strength: 1.0
   property bool filled: false
 

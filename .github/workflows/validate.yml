@@ -28,6 +28,16 @@ jobs:
       - name: Model tests
         run: node --test tests/model.test.js
 
+      # Qt 6.12 adds a `Color` type to QtQuick that shadows the shell's palette
+      # singleton, so a bare `Color.accent` reads undefined and the panel's
+      # text and highlights silently vanish. Only `Commons.Color` is safe.
+      - name: Qualified palette
+        run: |
+          if grep -nP '(?<![\w.])Color\.' *.qml; then
+            echo "use Commons.Color (import qs.Commons as Commons), not bare Color"
+            exit 1
+          fi
+
       - name: Manifest
         run: |
           jq -e '.schemaVersion == 1' manifest.json
