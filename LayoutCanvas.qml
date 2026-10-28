@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import "Model.js" as Model
 
 // The layout, drawn at the workspace's own aspect ratio, with the dividers
@@ -24,8 +25,8 @@ Item {
   // Per slot, the apps pinned to it — element 0 is slot 1. Drawn inside the
   // tile, because "which app lives here" is a property of the place.
   property var slotApps: []
-  property color foreground: Color.popups.text
-  property color accent: Color.accent
+  property color foreground: Commons.Color.popups.text
+  property color accent: Commons.Color.accent
   property real aspect: 16 / 9
 
   // Dragging a divider mutates the layout continuously; `committed` fires once
@@ -433,7 +434,7 @@ Item {
                   anchors.centerIn: parent
                   textFormat: Text.PlainText
                   text: cutButton.modelData.glyph
-                  color: cutHover.hovered ? Color.popups.background : root.foreground
+                  color: cutHover.hovered ? Commons.Color.popups.background : root.foreground
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -824,7 +825,7 @@ Item {
             ? label + "  \u21c4  " + root.carryOver
             : label
         }
-        color: Color.popups.background
+        color: Commons.Color.popups.background
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.bold: true
