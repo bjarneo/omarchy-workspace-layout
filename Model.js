@@ -881,13 +881,13 @@ function uniqueLayoutName(config, base) {
 
 function normalizeLayout(raw) {
   var input = (raw && typeof raw === "object") ? raw : {}
-  var kind = input.kind === "grid" ? "grid" : "ratio"
+  var kind = input.kind === "tabbed" ? "tabbed" : (input.kind === "grid" ? "grid" : "ratio")
   var orientation = input.orientation === "rows" ? "rows" : "columns"
   var overflow = input.overflow === "first" || input.overflow === "extend"
     ? input.overflow : "last"
   var fill = input.fill === "order" ? "order" : "largest"
-  var weights = normalizeWeights(input.weights)
-  var cells = normalizeCells(input.cells, weights.length)
+  var weights = kind === "tabbed" ? [100] : normalizeWeights(input.weights)
+  var cells = kind === "tabbed" ? [[100]] : normalizeCells(input.cells, weights.length)
   var underfill = input.underfill === "hold" || input.underfill === "rescale"
     ? input.underfill
     : defaultUnderfill(weights)
@@ -910,6 +910,7 @@ function normalizeLayout(raw) {
 // layout list where drawing a thumbnail would be too much.
 function describeLayout(layout) {
   var spec = normalizeLayout(layout)
+  if (spec.kind === "tabbed") return "one tab group"
   if (spec.kind === "grid") {
     return spec.gridColumns > 0 ? spec.gridColumns + "-column grid" : "auto grid"
   }
@@ -942,7 +943,8 @@ var PRESETS = [
   { id: "thirds", name: "Thirds", kind: "ratio", orientation: "columns", overflow: "extend", weights: [100 / 3, 100 / 3, 100 / 3] },
   { id: "wide-centre", name: "Wide centre", kind: "ratio", orientation: "columns", overflow: "last", weights: [20, 60, 20] },
   { id: "stacked", name: "Stacked", kind: "ratio", orientation: "rows", overflow: "last", weights: [50, 50] },
-  { id: "grid", name: "Grid", kind: "grid", orientation: "columns", overflow: "last", weights: [50, 50], gridColumns: 0 }
+  { id: "grid", name: "Grid", kind: "grid", orientation: "columns", overflow: "last", weights: [50, 50], gridColumns: 0 },
+  { id: "tabbed", name: "Tabbed", kind: "tabbed", weights: [100] }
 ]
 
 // Whether a layout is one of the shipped ones. Editing one starts a copy
@@ -999,6 +1001,10 @@ function normalizeConfig(raw) {
     layouts.push(layout)
   }
   if (layouts.length === 0) layouts = presets()
+  // Make the new mode available to existing documents without resetting their library.
+  if (!layouts.some(function(layout) { return layout.id === "tabbed" })) {
+    layouts.push(normalizeLayout({ id: "tabbed", name: "Tabbed", kind: "tabbed" }))
+  }
 
   var profiles = []
   var profileNames = {}
@@ -2707,6 +2713,7 @@ var LUA_RUNTIME = [
   'end',
   '',
   'function W.group_app(ws, class)',
+  '  if W.is_tabbed and W.is_tabbed(ws) then return end',
   '  if not W.groups[ws] or not W.groups[ws][class] or W.grouping then return end',
   '  if not hl.dsp.group or type(hl.dsp.group.toggle) ~= "function" then return end',
   '  W.grouping = true',
@@ -2739,9 +2746,78 @@ var LUA_RUNTIME = [
   'end',
   '',
   'function W.restore_groups()',
+  '  W.restore_tabbed()',
   '  for ws, classes in pairs(W.groups) do',
   '    for class in pairs(classes) do W.group_app(ws, class) end',
   '  end',
+  'end',
+  '',
+  '-- A workspace-wide group can contain different apps. Change group membership',
+  '-- outside recalculate: group:add itself triggers a layout recalculation.',
+  'function W.is_tabbed(ws)',
+  '  local live = hl.get_workspace(ws)',
+  '  local layout = live and live.tiled_layout or ""',
+  '  local prefix = "lua:omarchy-wsl-"',
+  '  local spec = layout:sub(1, #prefix) == prefix and W.specs[layout:sub(#prefix + 1)]',
+  '  return spec and spec.kind == "tabbed" or false',
+  'end',
+  '',
+  'function W.restore_tabbed()',
+  '  if W.grouping or not hl.get_windows or not hl.get_workspace then return end',
+  '  if not hl.dsp.group or type(hl.dsp.group.toggle) ~= "function" then return end',
+  '  W.grouping = true',
+  '  local ok, err = pcall(function()',
+  '    local workspaces = {}',
+  '    local focused = hl.get_active_window and hl.get_active_window()',
+  '    for _, win in ipairs(hl.get_windows()) do',
+  '      local ws = workspace_key(win.workspace)',
+  '      local group = win.group',
+  '      if win.mapped and not win.floating and ws and W.is_tabbed(ws)',
+  '          and not (group and (group.locked or group.denied)) then',
+  '        workspaces[ws] = workspaces[ws] or {}',
+  '        table.insert(workspaces[ws], win)',
+  '      end',
+  '    end',
+  '    for _, windows in pairs(workspaces) do',
+  '      local group, active = nil, nil',
+  '      for _, win in ipairs(windows) do',
+  '        if win == focused then active = win end',
+  '        if not group and win.group then group = win.group end',
+  '      end',
+  '      if active and active.group then group = active.group end',
+  '      if not group then',
+  '        local first = active or windows[1]',
+  '        hl.dispatch(hl.dsp.group.toggle({ window = first }))',
+  '        group = first.group',
+  '      end',
+  '      if group then',
+  '        local current = active or group.current',
+  '        for _, win in ipairs(windows) do',
+  '          -- Hyprland can refuse a barred window or a global group lock.',
+  '          -- Keep that target tiled separately and continue with the others.',
+  '          if win.group ~= group then pcall(function() group:add(win) end) end',
+  '        end',
+  '        if current and group.current ~= current then',
+  '          for index, member in ipairs(group.members) do',
+  '            if member == current then',
+  '              hl.dispatch(hl.dsp.group.active({ window = current, index = index }))',
+  '              break',
+  '            end',
+  '          end',
+  '        end',
+  '      end',
+  '    end',
+  '  end)',
+  '  W.grouping = false',
+  '  if not ok then error(err, 0) end',
+  'end',
+  '',
+  'function W.schedule_tabbed()',
+  '  if W.grouping or W.tabbed_timer or not hl.timer then return end',
+  '  W.tabbed_timer = hl.timer(function()',
+  '    W.tabbed_timer = nil',
+  '    W.restore_tabbed()',
+  '  end, { timeout = 1, type = "oneshot" })',
   'end',
   '',
   'function W.start_groups()',
@@ -2749,11 +2825,13 @@ var LUA_RUNTIME = [
   '    pcall(function() subscription:remove() end)',
   '  end',
   '  W.group_subscriptions = {}',
-  '  if next(W.groups) and type(hl.on) == "function" then',
+  '  if type(hl.on) == "function" then',
   '    local function opened(win)',
   '      if win and win.workspace then W.group_app(workspace_key(win.workspace), win.class) end',
+  '      W.schedule_tabbed()',
   '    end',
-  '    W.group_subscriptions = { hl.on("window.open", opened), hl.on("window.class", opened) }',
+  '    W.group_subscriptions = { hl.on("window.open", opened), hl.on("window.class", opened),',
+  '      hl.on("window.move_to_workspace", W.schedule_tabbed) }',
   '  end',
   '  W.restore_groups()',
   'end',
@@ -2990,6 +3068,7 @@ var LUA_RUNTIME = [
   '  if n == 0 then return end',
   '  local spec = W.specs[id]',
   '  if not spec then return end',
+  '  if spec.kind == "tabbed" then W.schedule_tabbed() end',
   '  local a = ctx.area',
   '  local rects = W.rects(spec, n)',
   '  local pick = W.assign(ctx.targets, n)',

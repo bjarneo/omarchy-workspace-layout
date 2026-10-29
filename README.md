@@ -260,6 +260,30 @@ A group uses the first slot on its pin. The restore count supports 1 to 32 windo
 Zero disables tab restoration. Automatic restoration preserves mixed-class and locked groups.
 Capture preserves mixed groups as one place but does not restore their tab membership.
 
+**Make a whole workspace tabbed.** Choose **Tabbed** in the layout library with
+`Give it to` set to the workspace, or run:
+
+```sh
+omarchy-shell workspace-layout set 5 tabbed
+```
+
+All its ordinary tiled windows join one native Hyprland tab group, even when
+they belong to different apps. The group fills the workspace; windows opened
+or moved there join automatically. Existing unlocked groups merge too. App pins
+still decide which apps open there, and their restore counts still work. You do
+not need a `group` count on each pin to use this layout.
+
+Switch tabs with Omarchy's `Super+Alt+Tab` / `Super+Alt+Shift+Tab` or
+`Super+Alt+1–5`. `Super+F` toggles fullscreen as usual. Floating dialogs stay
+floating; locked groups and windows Hyprland refuses to group remain separate.
+The canvas shows one place per group, and Tabbed has no split/overflow controls.
+
+Choosing another layout stops automatic grouping and keeps the existing tabs.
+Use `Super+G` after changing layouts if you also want to dissolve the group.
+While Tabbed is selected, ungrouped tiled windows are collected again.
+The new preset is added to existing layout libraries on upgrade without changing
+their workspace assignments.
+
 **Or have it press itself.** Beside that button, `at login → open these` marks
 the workspace as one that starts on its own: a few seconds into the session the
 plugin makes exactly the press you would have made, for every workspace marked
