@@ -2169,7 +2169,7 @@ test("right-clicking a tile opens the menu where the cursor is", () => {
 test("every command the CLI documents is answered by the panel", () => {
   const qml = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
   const commands = [
-    "open", "close", "show", "hide", "toggle",
+    "open", "close", "show", "hide", "toggle", "overview",
     "status", "workspace", "json", "profiles", "apply", "layouts",
     "set", "reset", "pin", "unpin", "catchapp", "capture", "launch"
   ]
@@ -2181,6 +2181,146 @@ test("every command the CLI documents is answered by the panel", () => {
   const ipc = qml.slice(qml.indexOf("IpcHandler {"), qml.indexOf("function summon()"))
   assert.ok(!/root\.selectedWorkspace/.test(ipc), "an IPC command read the panel's selection")
   assert.ok(!/root\.selectedSlot/.test(ipc), "an IPC command read the panel's aim")
+})
+
+test("the overview lists workspaces in use in strip order with counted apps", () => {
+  const state = Model.clientSnapshot([
+    { class: "chromium", workspace: { id: 7, name: "7" }, mapped: true, floating: false },
+    { class: "signal", workspace: { id: 7, name: "7" }, mapped: true, floating: false },
+    { class: "foot", workspace: { id: 1, name: "1" }, mapped: true, floating: false },
+    { class: "foot", workspace: { id: 1, name: "1" }, mapped: true, floating: false },
+    { class: "foot", workspace: { id: 1, name: "1" }, mapped: true, floating: false },
+    { class: "obsidian", workspace: { id: 1, name: "1" }, mapped: true, floating: false },
+    { class: "calc", workspace: { id: 1, name: "1" }, mapped: true, floating: true },
+    { class: "mpv", workspace: { id: 4, name: "4" }, mapped: true, floating: true },
+    { class: "code", workspace: { id: -2, name: "code" }, mapped: true, floating: false },
+    { class: "scratch", workspace: { id: -98, name: "special:scratchpad" }, mapped: true, floating: false }
+  ])
+  const rows = Model.overviewWorkspaces(state.windows, "1")
+  assert.deepEqual(rows.map((row) => row.key), ["1", "4", "7", "name:code"])
+  assert.deepEqual(rows[0].apps,
+    [{ match: "foot", count: 3 }, { match: "calc", count: 1 }, { match: "obsidian", count: 1 }])
+  assert.deepEqual(rows[2].apps, [{ match: "chromium", count: 1 }, { match: "signal", count: 1 }])
+  // A workspace of floating windows is still in use. Omarchy's floating mode
+  // makes every window on it float.
+  assert.deepEqual(rows[1].apps, [{ match: "mpv", count: 1 }])
+  // The card picture still counts only tiled windows.
+  assert.equal(state.counts["4"], undefined)
+})
+
+test("the overview always shows the workspace in view, even an empty one", () => {
+  assert.deepEqual(Model.overviewWorkspaces({}, "3"), [{ key: "3", apps: [] }])
+  assert.deepEqual(Model.overviewWorkspaces({ "5": { foot: 1 } }, "name:notes").map((row) => row.key),
+    ["5", "name:notes"])
+  // The workspace in view is not listed twice when it has windows.
+  assert.deepEqual(Model.overviewWorkspaces({ "2": { foot: 1 } }, "2").map((row) => row.key), ["2"])
+  assert.deepEqual(Model.overviewWorkspaces({}, null), [])
+})
+
+test("the new workspace card goes to the lowest number not on the overview", () => {
+  assert.equal(Model.freeWorkspace(["1", "2", "4"]), "3")
+  assert.equal(Model.freeWorkspace(["name:code", "2"]), "1")
+  assert.equal(Model.freeWorkspace([]), "1")
+  const all = []
+  for (let n = 1; n <= 99; n++) all.push(String(n))
+  assert.equal(Model.freeWorkspace(all), null)
+})
+
+test("the overview grid fits every card without scaling the text", () => {
+  const options = { aspect: 16 / 10, gap: 14, caption: 40, maxWidth: 300, maxColumns: 5 }
+  for (let count = 1; count <= 24; count++) {
+    for (const [width, height] of [[1300, 760], [3700, 2000], [700, 1200], [400, 300]]) {
+      const grid = Model.overviewGrid(count, width, height, options)
+      assert.ok(grid.columns >= 1 && grid.columns <= 5, `columns for ${count} in ${width}x${height}`)
+      assert.equal(grid.rows, Math.ceil(count / grid.columns))
+      assert.ok(grid.cardWidth <= 300)
+      assert.equal(grid.frameHeight, Math.max(1, Math.floor(grid.cardWidth / options.aspect)))
+      if (grid.cardWidth > 1) {
+        assert.ok(grid.columns * grid.cardWidth + (grid.columns - 1) * 14 <= width, `width for ${count}`)
+        assert.ok(grid.rows * (grid.frameHeight + 40) + (grid.rows - 1) * 14 <= height, `height for ${count}`)
+      }
+    }
+  }
+  // Room to spare goes to a wider row, not a taller column.
+  assert.equal(Model.overviewGrid(2, 1300, 760, options).columns, 2)
+  assert.equal(Model.overviewGrid(4, 1300, 760, options).columns, 4)
+  // A screen too small for anything still gets one card of one pixel.
+  assert.equal(Model.overviewGrid(3, 0, 0, options).cardWidth, 1)
+})
+
+test("a rotated monitor swaps its sides for the overview picture", () => {
+  assert.equal(Model.monitorAspect(2560, 1440, 0), 2560 / 1440)
+  assert.equal(Model.monitorAspect(2560, 1440, 1), 1440 / 2560)
+  assert.equal(Model.monitorAspect(2560, 1440, 2), 2560 / 1440)
+  assert.equal(Model.monitorAspect(2560, 1440, 7), 1440 / 2560)
+  assert.equal(Model.monitorAspect(0, 1440, 0), null)
+})
+
+test("a workspace key sorts numbers before names and stays in number order", () => {
+  assert.deepEqual(["name:code", "10", "2", "name:alpha"].sort(Model.compareWorkspaceKeys),
+    ["2", "10", "name:alpha", "name:code"])
+})
+
+test("the overview is a shell overlay the panel owns and the CLI opens", () => {
+  const panel = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  const overview = fs.readFileSync(path.join(__dirname, "..", "Overview.qml"), "utf8")
+  assert.match(panel, /function overview\(\): string \{ return root\.toggleOverview\(\) \}/)
+  // Built on the first request, by URL, so an older shell fails only the Loader.
+  assert.match(panel, /active: root\.overviewWanted\s+source: Qt\.resolvedUrl\("Overview\.qml"\)/)
+  assert.match(panel, /property: "workspaces"\s+value: root\.overviewRow/)
+  assert.ok(!/^\s*Overview \{/m.test(panel), "Overview is built inline")
+  // It waits for a window read made after the request.
+  assert.match(panel, /property: "opened"\s+value: root\.overviewOpen && root\.overviewFresh/)
+  // It reads again on Hyprland's window events instead of polling.
+  assert.match(panel, /enabled: root\.overviewOpen[\s\S]{0,200}function onRawEvent/)
+  assert.ok(!/running: root\.opened \|\| root\.overviewOpen/.test(panel), "the overview joined the 700ms poll")
+  // The shell's own overlay window: the focused monitor, a sharp first frame,
+  // and the right-to-left mirroring.
+  assert.match(overview, /OverlayWindow \{/)
+  assert.ok(!/PanelWindow \{/.test(overview))
+  // Qt 6.12 shadows an unqualified Color, so the palette is read qualified.
+  assert.ok(!/(^|[^.\w])Color\./m.test(overview), "unqualified Color in Overview.qml")
+  assert.match(overview, /Commons\.Color\.menu\.scrim/)
+  assert.match(overview, /model: root\.count/)
+  assert.match(overview, /Keys\.onPressed/)
+  // The new workspace card writes nothing to the document.
+  assert.ok(!/newLayout\(\)/.test(panel.slice(panel.indexOf("function newWorkspaceFromOverview"),
+    panel.indexOf("Timer {", panel.indexOf("function newWorkspaceFromOverview")))))
+})
+
+test("only the overview uses shell types newer than Omarchy 4.0", () => {
+  // OverlayWindow and ShellIpc arrived in Omarchy 4.5. A file that builds one
+  // inline does not load on 4.0.6, and Panel.qml not loading is the whole
+  // plugin gone. Overview.qml is loaded by URL, so it alone may use them.
+  const dir = path.join(__dirname, "..")
+  for (const name of fs.readdirSync(dir).filter((file) => file.endsWith(".qml") && file !== "Overview.qml")) {
+    const source = fs.readFileSync(path.join(dir, name), "utf8")
+    assert.ok(!/^\s*(OverlayWindow|ShellIpc|WatchedFile) \{/m.test(source), `${name} builds a 4.5-only type`)
+    assert.ok(!/(^|[^.\w])IpcRegistry\./m.test(source), `${name} reads IpcRegistry without a guard`)
+  }
+})
+
+test("one copy of the panel answers the command line and opens on the focused monitor", () => {
+  const panel = fs.readFileSync(path.join(__dirname, "..", "Panel.qml"), "utf8")
+  const widget = fs.readFileSync(path.join(__dirname, "..", "BarWidget.qml"), "utf8")
+  // The shell's election when the shell has it, every copy when it does not.
+  assert.match(panel, /enabled: Commons\.IpcRegistry \? Commons\.IpcRegistry\.leads\(ipc, Commons\.IpcRegistry\.revision\) : true/)
+  assert.match(panel, /Component\.onCompleted: if \(Commons\.IpcRegistry\) Commons\.IpcRegistry\.register\(ipc\)/)
+  assert.match(panel, /Component\.onDestruction: if \(Commons\.IpcRegistry\) Commons\.IpcRegistry\.unregister\(ipc\)/)
+  // A third-party bar has no summonBarWidget, so the panel finds its own copy.
+  assert.match(panel, /bar\.moduleWidgets\(moduleName\)/)
+  assert.match(panel, /focusedCopy\(\)\.open\(\)/)
+  assert.match(widget, /readonly property var panelItem: panelLoader\.item/)
+  assert.match(panel, /function toggle\(\): void \{ root\.togglePanel\(\) \}/)
+})
+
+test("no QML file reads the palette through an unqualified Color", () => {
+  const dir = path.join(__dirname, "..")
+  for (const name of fs.readdirSync(dir).filter((file) => file.endsWith(".qml"))) {
+    const source = fs.readFileSync(path.join(dir, name), "utf8")
+    assert.ok(!/(^|[^.\w])Color\.(accent|popups|menu|urgent|foreground|background)/m.test(source),
+      `${name} reads Color without Commons`)
+  }
 })
 
 test("a status line says what a workspace is tiling with and why", () => {

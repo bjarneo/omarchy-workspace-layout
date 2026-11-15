@@ -25,13 +25,15 @@ one and it stacks where you said extras should go.
 | Omarchy (Quattro plugin runtime) | the bar widget and panel are Quickshell QML loaded by `omarchy-shell` |
 | Hyprland 0.55 or newer | `hl.layout.register`, the Lua layout API the whole plugin is built on |
 | Hyprland 0.56 or newer | workspace swaps and tab-group restoration |
+| Omarchy 4.5 or newer | the overview only. The rest works on Omarchy 4.0 |
 | `hyprctl` | on `PATH`; how layouts and workspace rules are applied |
 
 No other runtime, package, background service, network access, or privileged
 command. Everything ships in this repository: the panel is QML, the layout
 engine is Lua generated from `Model.js`, and there is no compiled component.
 
-Built and tested against Hyprland 0.56.2 on Omarchy 4.0.2.
+Built and tested against Hyprland 0.56.2 on Omarchy 4.0.2. The overview was
+tested against Hyprland 0.57.2 on an Omarchy 4.5 development build.
 
 ## Install
 
@@ -368,10 +370,18 @@ omarchy-shell workspace-layout apply focus
 ```
 
 `status`, `workspace`, `json`, `profiles`, `layouts`, `apply`, `set`, `reset`,
-`swap`, `pin`, `pincommand`, `group`, `unpin`, `catchapp`, `capture`, `launch`, and the panel's own
+`swap`, `pin`, `pincommand`, `group`, `unpin`, `catchapp`, `capture`, `launch`, `overview`, and the panel's own
 `toggle` / `open` / `close`. `catchapp` takes a layout, an app and its places; no places
 releases it. Every command, what it prints, and a worked example are in
 [docs/cli.md](docs/cli.md).
+
+### The overview
+
+`omarchy-shell workspace-layout overview` shows every workspace in use on one
+screen. Each card shows the layout of its workspace and the apps open there.
+Click a card or press its number to go there. The last card goes to the lowest
+free workspace and opens the panel, so you can pick a layout for it. `Esc`
+closes the overview. [docs/cli.md](docs/cli.md#the-overview) lists every key.
 
 ### A keybinding
 
@@ -379,10 +389,12 @@ The panel answers on the shell's IPC bus, so bind it in
 `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + ALT + L", "Workspace layout", "omarchy-shell workspace-layout toggle")
+o.bind("SUPER + ALT + W", "Workspace layout", "omarchy-shell workspace-layout toggle")
+o.bind("SUPER + ALT + O", "Workspace overview", "omarchy-shell workspace-layout overview")
 ```
 
-`SUPER + ALT + L` is unbound in a stock Omarchy install.
+Stock Omarchy leaves `SUPER + ALT + W` and `SUPER + ALT + O` free. It binds
+`SUPER + ALT + L` to "Cycle workspace layout back".
 
 ## Files
 

@@ -1,5 +1,17 @@
 # Features
 
+## Version 1.4
+
+- Show every workspace in use on one screen with `overview`. Each card shows
+  the layout and the apps. Click a card or press its number to go there.
+- Start a new workspace from the overview. The panel opens on it to pick a
+  layout, and nothing changes until you pick one.
+- Open the panel on the focused monitor when a keybinding or a script asks
+  for it.
+- Answer the command line from one copy of the panel on Omarchy 4.5, with no
+  warning for each extra monitor.
+- Read the palette correctly on Qt 6.12.
+
 ## Version 1.3
 
 - Swap numbered workspaces with their windows, layouts, pins, and login marks.
@@ -65,12 +77,15 @@ Everything the plugin does, in one list.
 - Omarchy's Super+L dwindle/scrolling toggle is followed, so the bar and the
   panel match the workspace Hyprland is actually tiling
 - Clicking a workspace takes you to it
+- An overview shows every workspace in use on one screen, with its layout and
+  its apps. Click a card or press its number to go there. The last card starts
+  a new workspace and opens the panel on it
 - The panel scrolls when it grows taller than the screen
 - Restore defaults puts back the shipped layouts, one profile, and every
   workspace on Hyprland's own tiling
-- Sixteen command-line commands: status, workspace, json, profiles, apply,
-  layouts, set, reset, pin, unpin, capture, launch, open, close, show, hide,
-  toggle
+- 22 command-line commands: status, workspace, json, profiles, apply,
+  layouts, set, reset, swap, pin, pincommand, group, unpin, catchapp, capture,
+  launch, overview, open, close, show, hide, toggle
 - The config is plain JSON you can edit by hand, and it reloads within a second
 - Anything malformed in it is repaired rather than refused
 

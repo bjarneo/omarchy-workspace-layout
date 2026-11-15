@@ -371,15 +371,81 @@ Panel {
     if (!hasNamed) {
       for (i = 1; i <= 10; i++) if (ids.indexOf(String(i)) === -1) ids.push(String(i))
     }
-    ids.sort(function(a, b) {
-      var an = Model.normalizeWorkspaceId(a)
-      var bn = Model.normalizeWorkspaceId(b)
-      if (an !== null && bn !== null) return Number(an) - Number(bn)
-      if (an !== null) return -1
-      if (bn !== null) return 1
-      return a.localeCompare(b)
-    })
+    ids.sort(Model.compareWorkspaceKeys)
     return ids
+  }
+
+  // The overview is a fullscreen overlay of its own, opened by `overview` on
+  // the command line. `overviewOpen` is the request. `overviewFresh` turns
+  // true once a window read made after the request is back, so the overview
+  // never shows what was open the last time someone looked.
+  property bool overviewOpen: false
+  property bool overviewFresh: false
+  // Turns true on the first request and stays true, so the overview is built
+  // once, on demand, and not at startup on every monitor.
+  property bool overviewWanted: false
+
+  // The monitor this copy of the panel is drawn on. Other copies read it to
+  // find the one on the focused monitor.
+  readonly property string screenName: panel.screen ? String(panel.screen.name || "") : ""
+
+  // Width over height per monitor name, so a workspace on a portrait screen
+  // is drawn portrait even when the overview opens on a landscape one.
+  readonly property var monitorAspects: {
+    var out = ({})
+    var values = Hyprland.monitors ? Hyprland.monitors.values : []
+    for (var i = 0; i < values.length; i++) {
+      var ipc = values[i].lastIpcObject || ({})
+      var aspect = Model.monitorAspect(values[i].width, values[i].height, ipc.transform)
+      if (aspect !== null) out[String(values[i].name || "")] = aspect
+    }
+    return out
+  }
+
+  // What the overview draws: every workspace with a window on it, and the one
+  // in view, in the strip's order. Each row carries its shape, the name of
+  // that shape, and the apps open there. Empty while the overview is shut,
+  // so the 700ms panel poll does not rebuild rows nobody sees.
+  readonly property var overviewRow: {
+    if (!root.overviewOpen) return []
+    var out = []
+    var rows = Model.overviewWorkspaces(root.windowsByWorkspace, root.focusedWorkspaceKey)
+    for (var i = 0; i < rows.length; i++) {
+      var key = rows[i].key
+      var names = []
+      for (var j = 0; j < rows[i].apps.length; j++) {
+        var app = rows[i].apps[j]
+        var label = root.appNameFor(app.match)
+        names.push(app.count > 1 ? label + " ×" + app.count : label)
+      }
+      var monitor = root.workspaceMonitors[key] || ""
+      var layoutId = root.workspaceLayoutId(key, monitor)
+      var layout = Model.findLayout(root.config, layoutId)
+      var entry = root.libraryEntry(layoutId)
+      var windows = root.tiledCounts[key]
+      out.push({
+        workspace: key,
+        label: Model.workspaceLabel(key),
+        focused: key === root.focusedWorkspaceKey,
+        // A Hyprland built-in still gets a picture, drawn faint, the way the
+        // strip and the bar icon draw it.
+        layout: layout || (entry ? entry.thumb : null),
+        builtin: !layout,
+        layoutName: entry ? entry.name : layoutId,
+        windows: windows === undefined ? 0 : windows,
+        apps: names.join(", "),
+        aspect: root.monitorAspects[monitor] || 0
+      })
+    }
+    return out
+  }
+
+  // The number the overview's "new workspace" card goes to, or "" when every
+  // number is in use.
+  readonly property string overviewFreeWorkspace: {
+    var taken = []
+    for (var i = 0; i < overviewRow.length; i++) taken.push(overviewRow[i].workspace)
+    return Model.freeWorkspace(taken) || ""
   }
 
   readonly property var library: {
@@ -394,13 +460,167 @@ Panel {
     return out
   }
 
+  function libraryEntry(id) {
+    for (var i = 0; i < library.length; i++) {
+      if (library[i].id === id) return library[i]
+    }
+    return null
+  }
+
   // -------------------------------------------------------------- lifecycle
 
   function openFromHotkey() { open() }
 
+  // The panel and the overview are two answers to the same question, so only
+  // one of them is on screen at a time. The overview waits for a fresh window
+  // read. If that read hangs, `overviewWait` shows the last one. Returns an
+  // error for the command line, or "" when the overview opens.
+  function openOverview() {
+    overviewWanted = true
+    if (overviewLoader.status !== Loader.Ready) {
+      return "Cannot load the overview. It needs Omarchy 4.5 or later."
+    }
+    var copies = panelCopies()
+    for (var i = 0; i < copies.length; i++) {
+      if (copies[i].opened) copies[i].close()
+    }
+    overviewFresh = false
+    overviewOpen = true
+    refreshCounts()
+    overviewWait.restart()
+    return ""
+  }
+
+  function closeOverview() {
+    overviewOpen = false
+    overviewFresh = false
+    overviewWait.stop()
+  }
+
+  function toggleOverview() {
+    if (!overviewOpen) return openOverview()
+    closeOverview()
+    return ""
+  }
+
+  // Every copy of this panel, one per bar. The bar lists a plugin's own
+  // widgets on every monitor, and each widget carries its panel.
+  function panelCopies() {
+    var out = []
+    var widgets = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    for (var i = 0; i < widgets.length; i++) {
+      var copy = widgets[i] ? widgets[i].panelItem : null
+      if (copy && out.indexOf(copy) === -1) out.push(copy)
+    }
+    if (out.indexOf(root) === -1) out.push(root)
+    return out
+  }
+
+  // The copy a command means: one that is already open, then the one on the
+  // focused monitor, then this one. The bar picks its own widgets in the
+  // same order.
+  function focusedCopy() {
+    var copies = panelCopies()
+    var i
+    for (i = 0; i < copies.length; i++) {
+      if (copies[i].opened) return copies[i]
+    }
+    var monitor = Hyprland.focusedMonitor ? String(Hyprland.focusedMonitor.name || "") : ""
+    for (i = 0; i < copies.length; i++) {
+      if (monitor !== "" && copies[i].screenName === monitor) return copies[i]
+    }
+    return root
+  }
+
+  function togglePanel() {
+    var copy = focusedCopy()
+    if (copy.opened) copy.close()
+    else summon()
+  }
+
+  // `close` and `hide` on the command line: every copy, and the overview.
+  function closeAll() {
+    closeOverview()
+    var copies = panelCopies()
+    for (var i = 0; i < copies.length; i++) copies[i].close()
+  }
+
+  // A card goes to its workspace, the way a chip in the strip does. A card
+  // for the workspace in view only closes the overview: with Hyprland's
+  // `workspace_back_and_forth` on, focusing it again would leave it.
+  function activateOverviewWorkspace(workspace) {
+    var key = Model.workspaceKey(workspace)
+    closeOverview()
+    if (key === null || key === focusedWorkspaceKey) return
+    if (bar) bar.run(Model.focusWorkspaceCommand(key))
+  }
+
+  // The "new workspace" card goes to an empty number and opens the panel
+  // there, because a new workspace starts with the question of its shape.
+  // Nothing is written until the user picks one. The panel waits for
+  // Hyprland to report the move, or it opens on the workspace that was left.
+  property string pendingPanelWorkspace: ""
+
+  function newWorkspaceFromOverview(workspace) {
+    var key = Model.workspaceKey(workspace)
+    closeOverview()
+    if (key === null) return
+    if (key === focusedWorkspaceKey) {
+      summon()
+      return
+    }
+    pendingPanelWorkspace = key
+    panelAfterFocus.restart()
+    if (bar) bar.run(Model.focusWorkspaceCommand(key))
+  }
+
+  Timer {
+    id: overviewWait
+    interval: 300
+    onTriggered: if (root.overviewOpen) root.overviewFresh = true
+  }
+
+  // A move that Hyprland does not report in this time did not happen, so the
+  // panel stays shut rather than open on the wrong workspace.
+  Timer {
+    id: panelAfterFocus
+    interval: 1500
+    onTriggered: root.pendingPanelWorkspace = ""
+  }
+
+  // While the overview is up, a window that opens, closes or moves redraws
+  // it. Hyprland reports each one on its event socket, so nothing polls.
+  Connections {
+    target: Hyprland
+    enabled: root.overviewOpen
+    function onRawEvent(event) {
+      if (["openwindow", "closewindow", "movewindowv2", "changefloatingmode",
+        "createworkspacev2", "destroyworkspacev2", "renameworkspace"].indexOf(event.name) !== -1) {
+        overviewEvents.restart()
+      }
+    }
+  }
+
+  // Events come in bursts, and a read already under way would miss the end
+  // of one, so the read waits until the burst and the earlier read are done.
+  Timer {
+    id: overviewEvents
+    interval: 60
+    onTriggered: {
+      if (countProcess.running) overviewEvents.restart()
+      else root.refreshCounts()
+    }
+  }
+
   onOpenedChanged: {
     armedDelete = ""
     creatingProfile = false
+    // The overview is the other way in. Opening the panel puts it away, in
+    // whichever copy opened it.
+    if (opened) {
+      var copies = panelCopies()
+      for (var c = 0; c < copies.length; c++) copies[c].closeOverview()
+    }
     // A search, an aimed slot and an open menu are all about the moment they
     // were made in. Reopening the panel should not resume someone else's
     // half-finished sentence.
@@ -416,7 +636,16 @@ Panel {
     }
   }
 
-  onFocusedWorkspaceKeyChanged: if (!workspacePinned && !opened) selectedWorkspace = focusedWorkspaceKey
+  onFocusedWorkspaceKeyChanged: {
+    if (!workspacePinned && !opened) selectedWorkspace = focusedWorkspaceKey
+    // The overview's "new workspace" card asked for the panel once Hyprland
+    // arrives there.
+    if (pendingPanelWorkspace !== "" && pendingPanelWorkspace === focusedWorkspaceKey) {
+      pendingPanelWorkspace = ""
+      panelAfterFocus.stop()
+      summon()
+    }
+  }
 
   function selectWorkspace(id) {
     selectedWorkspace = id
@@ -1463,6 +1692,8 @@ Panel {
         } catch (error) {
           root.windowReadError = "Cannot read Hyprland windows. Retry the launch."
         }
+        // A failed read also lets the overview open, on the last good one.
+        if (root.overviewOpen) root.overviewFresh = true
       }
     }
   }
@@ -1470,6 +1701,7 @@ Panel {
   Timer {
     // Keeps running past a close while a launch is still being waited on: the
     // app the user just asked for may take a few seconds to show a window.
+    // The overview is not here: it reads again on Hyprland's window events.
     running: root.opened || root.pendingLaunches.length > 0 || root.requestedLaunches.length > 0 || root.autostartWanted
     interval: 700
     repeat: true
@@ -1621,14 +1853,32 @@ Panel {
   // command line lives here rather than in the optional service. Every
   // function takes what it acts on: nothing reads the panel's selection, so a
   // script does the same thing whether the panel is open or not.
+  //
+  // Every monitor builds a copy of this panel, and Quickshell warns about each
+  // extra handler for one target. On Omarchy 4.5 and later, the shell's
+  // registry elects one copy: the first that is live answers, and the next
+  // takes over when it goes. omarchy-shell then also reaches it over the
+  // shell's own socket. That is what the shell's ShellIpc does, done here by
+  // hand. ShellIpc itself would stop this file loading on an older shell. There
+  // `Commons.IpcRegistry` is undefined and every copy keeps its handler.
   IpcHandler {
+    id: ipc
     target: "workspace-layout"
+    enabled: Commons.IpcRegistry ? Commons.IpcRegistry.leads(ipc, Commons.IpcRegistry.revision) : true
+
+    Component.onCompleted: if (Commons.IpcRegistry) Commons.IpcRegistry.register(ipc)
+    Component.onDestruction: if (Commons.IpcRegistry) Commons.IpcRegistry.unregister(ipc)
 
     function open(): void { root.summon() }
-    function close(): void { root.close() }
+    function close(): void { root.closeAll() }
     function show(): void { root.summon() }
-    function hide(): void { root.close() }
-    function toggle(): void { root.opened ? root.close() : root.summon() }
+    function hide(): void { root.closeAll() }
+    function toggle(): void { root.togglePanel() }
+
+    // The overview, for a keybind: every workspace in use on one surface.
+    // It toggles, so the same key opens and closes it. It prints an error on
+    // a shell too old to draw it, and nothing otherwise.
+    function overview(): string { return root.toggleOverview() }
 
     // Every workspace worth a line — one the plugin is tiling, one with apps
     // pinned to it, or the one you are looking at — because a command line
@@ -1803,15 +2053,60 @@ Panel {
     }
   }
 
+  // Opens the panel on the focused monitor. The built-in bar does that for a
+  // first-party widget. A third-party plugin gets no `summonBarWidget`, so it
+  // finds its own copy on that monitor.
   function summon() {
     if (bar && typeof bar.summonBarWidget === "function" && bar.summonBarWidget(moduleName)) return
-    open()
+    focusedCopy().open()
   }
 
   // ------------------------------------------------------------------- view
 
   readonly property color fg: Commons.Color.popups.text
   readonly property color accent: Commons.Color.accent
+
+  // The CLI's `overview` opens this, not the panel: every workspace at once is
+  // a different question from "how is this one split". Its OverlayWindow opens
+  // on the focused monitor, whichever copy of the panel answers the command.
+  //
+  // Loaded by URL on the first request. OverlayWindow arrived in Omarchy 4.5,
+  // and on an older shell only this Loader fails. An inline Overview would
+  // stop the whole panel loading there.
+  Loader {
+    id: overviewLoader
+    active: root.overviewWanted
+    source: Qt.resolvedUrl("Overview.qml")
+  }
+
+  Binding {
+    target: overviewLoader.item
+    when: overviewLoader.status === Loader.Ready
+    property: "opened"
+    value: root.overviewOpen && root.overviewFresh
+  }
+
+  Binding {
+    target: overviewLoader.item
+    when: overviewLoader.status === Loader.Ready
+    property: "workspaces"
+    value: root.overviewRow
+  }
+
+  Binding {
+    target: overviewLoader.item
+    when: overviewLoader.status === Loader.Ready
+    property: "freeWorkspace"
+    value: root.overviewFreeWorkspace
+  }
+
+  Connections {
+    target: overviewLoader.item
+    ignoreUnknownSignals: true
+    function onCloseRequested() { root.closeOverview() }
+    function onWorkspaceActivated(workspace) { root.activateOverviewWorkspace(workspace) }
+    function onNewWorkspaceRequested(workspace) { root.newWorkspaceFromOverview(workspace) }
+  }
 
   KeyboardPanel {
     id: panel

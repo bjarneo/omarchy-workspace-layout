@@ -20,6 +20,10 @@ BarWidget {
   }
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+  // This monitor's copy of the panel. The copy that answers the command line
+  // reads it through the bar's `moduleWidgets` to open the panel on the
+  // focused monitor.
+  readonly property var panelItem: panelLoader.item
   readonly property var focusedLayout: panelLoader.item ? panelLoader.item.focusedLayout : null
   readonly property string focusedLayoutId: panelLoader.item ? panelLoader.item.focusedLayoutId : "dwindle"
   readonly property bool managing: panelLoader.item ? panelLoader.item.managingFocused === true : false

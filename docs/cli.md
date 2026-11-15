@@ -285,16 +285,51 @@ o.exec_on_start("sleep 5; omarchy-shell workspace-layout launch 1")
 omarchy-shell workspace-layout toggle   # or open / close / show / hide
 ```
 
+`close` and `hide` also close the overview.
+
 Bind it in `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + ALT + L", "Workspace layout", "omarchy-shell workspace-layout toggle")
+o.bind("SUPER + ALT + W", "Workspace layout", "omarchy-shell workspace-layout toggle")
+```
+
+Stock Omarchy binds `SUPER + ALT + L` to "Cycle workspace layout back". The
+examples on this page use keys that stock Omarchy leaves free.
+
+## The overview
+
+```bash
+omarchy-shell workspace-layout overview
+```
+
+The overview shows every workspace that has a window on it, plus the workspace
+in view. Each card shows the layout of its workspace, the layout name, and the
+apps open there. The command toggles, so one key opens and closes it. The
+overview opens on the focused monitor.
+
+The overview needs Omarchy 4.5 or later. On an older Omarchy, the command
+prints `Cannot load the overview. It needs Omarchy 4.5 or later.` and the
+panel works as before.
+
+| Input | Result |
+| --- | --- |
+| Click a card, or select it and press `Enter` or `Space` | Go to that workspace |
+| Arrow keys, `Tab`, `Home`, `End` | Move the selection |
+| `1` to `9`, `0` | Go to workspace 1 to 9, or 10 for `0` |
+| The last card, "New workspace" | Go to the lowest free number and open the panel there |
+| `Esc`, or a click outside the card | Close the overview |
+
+The "New workspace" card changes no layout. The panel opens on the new
+workspace, and you pick its layout there.
+
+```lua
+o.bind("SUPER + ALT + O", "Workspace overview", "omarchy-shell workspace-layout overview")
 ```
 
 ### Use a prefix key
 
 To select layouts with a prefix key, use a Hyprland submap in `~/.config/hypr/bindings.lua`.
-This example uses `SUPER + ALT + L`, followed by `D`, `G`, or `S`.
+This example uses `SUPER + ALT + P`, followed by `D`, `G`, or `S`.
 
 ```lua
 local function choose_layout(layout)
@@ -306,7 +341,7 @@ local function choose_layout(layout)
   hl.exec_cmd("omarchy-shell workspace-layout set " .. quoted .. " " .. layout)
 end
 
-hl.bind("SUPER + ALT + L", hl.dsp.submap("workspace-layout"))
+hl.bind("SUPER + ALT + P", hl.dsp.submap("workspace-layout"))
 hl.define_submap("workspace-layout", function()
   hl.bind("D", function() choose_layout("dwindle") end)
   hl.bind("G", function() choose_layout("golden") end)

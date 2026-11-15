@@ -18,6 +18,7 @@ documentation — read it yourself, or point a tool at it explicitly.
 | `HyprlandSync.qml` | Read live workspaces, apply the latest config, then run queued app actions and workspace swaps. Preview has a separate queue. |
 | `AppPinEditor.qml` | Edit a pin's class, command, name, slots, and tab-group count. |
 | `Panel.qml` | The UI. Owns its own store and sync — see below. |
+| `Overview.qml` | Fullscreen overlay with one card per workspace in use. `Panel.qml` owns it and feeds it `overviewRow`. |
 | `Service.qml` | Optional background sync for a bar-less install. |
 | `docs/development.md` | This file: how the pieces fit and what will bite you. |
 
@@ -249,6 +250,45 @@ Established by probing 0.56.2; the Lua stubs are at `/usr/share/hypr/stubs/hl.me
   error that stops the whole panel loading: *"Property value set multiple
   times"*. `qmllint` still exits 0; the tell is its warning count for the file
   collapsing, because analysis bails at that point.
+
+- **Read the palette as `Commons.Color`.** Qt 6.12 adds a `Color` type to
+  `QtQuick` that shadows the shell's singleton. An unqualified `Color.accent`
+  is then undefined, and qmllint reports `Member "accent" not found on type
+  "QQuickColor"`. Import `qs.Commons as Commons` next to `qs.Commons`. A test
+  rejects an unqualified palette read in any QML file.
+- **Build a fullscreen surface on `OverlayWindow` from `qs.Ui`, not on a bare
+  `PanelWindow`.** It opens on the focused monitor, keeps its first frames
+  transparent until the output scale arrives, and mirrors for right-to-left
+  languages. Drive it with `shown`, not `visible`. The dock's app grid at
+  `/usr/share/omarchy/shell/plugins/dock/AppGrid.qml` is the reference: a
+  `Commons.Color.menu.scrim` scrim, a `BorderSurface` card in the menu
+  palette, and a key catcher.
+- An overlay is above every window. A transparent area in it shows the
+  windows of the workspace in view, not the wallpaper.
+- Hover selection goes through `PointerMoveGate`, measured against the window
+  content item. A card that resizes under a still pointer is not a move.
+- The overview does not join the 700ms poll. It reads once on open, waits for
+  that read before it shows, and reads again on Hyprland's window events.
+- **Omarchy 4.0.6 is the newest stable release, and it has no `OverlayWindow`,
+  `ShellIpc` or `IpcRegistry`.** Those arrived in 4.5.0-rc1. A file that builds
+  an unknown type inline does not load, and `Panel.qml` not loading is the
+  whole plugin gone. Two rules follow, and a test holds both:
+  - `Overview.qml` is the only file that may use a 4.5 type. `Panel.qml` loads
+    it with a `Loader` by URL, so on 4.0.6 only that `Loader` fails and the
+    `overview` command prints an error.
+  - Reach a 4.5 singleton through the namespace, behind a check:
+    `Commons.IpcRegistry ? … : fallback`. On an older shell the lookup is
+    `undefined`, not a load error. A probe on Qt 6.12 confirmed this.
+- **One copy answers the command line.** Every monitor builds a copy of the
+  panel. The `IpcHandler` does what `ShellIpc` does, by hand: it registers
+  with `Commons.IpcRegistry` and enables itself only while it leads its
+  target. Without the registry, every copy keeps its handler and Quickshell
+  answers with the first.
+- **A third-party bar has no `summonBarWidget`.** `PluginBarApi` has `run` and
+  `moduleWidgets` only. `Panel.summon()` therefore reads this plugin's widgets
+  from `bar.moduleWidgets(moduleName)`, takes each `BarWidget.panelItem`, and
+  opens the copy that is already open, else the one on the focused monitor.
+  The bar's own `pickPanelSlot` uses the same order.
 
 - `omarchy plugin enable` places a bar widget; mounting a `service` kind needs an
   entry in shell.json's top-level `plugins[]`. A plugin declaring both, enabled

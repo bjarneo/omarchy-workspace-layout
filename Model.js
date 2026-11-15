@@ -2472,6 +2472,114 @@ function clientSnapshot(clients) {
   return { counts: counts, windows: windows, tiledWindows: tiledWindows, apps: Object.keys(apps).sort() }
 }
 
+// The overview's rows: every workspace with a window on it, plus the one in
+// view even when it is empty, in the order the strip shows them. Floating
+// windows count. A workspace in Omarchy's floating mode holds nothing else,
+// and a tiled-only read would leave it out. The picture on each card still
+// comes from the tiled count. Read from a client snapshot rather than the
+// config, because a layout is a document and what is open right now is not.
+function overviewWorkspaces(windows, focused) {
+  var map = windows && typeof windows === "object" ? windows : {}
+  var rows = []
+  var seen = {}
+  for (var raw in map) {
+    var key = normalizeWorkspaceKey(raw)
+    if (key === null || seen[key]) continue
+    var apps = workspaceApps(map[raw])
+    if (apps.length === 0) continue
+    seen[key] = true
+    rows.push({ key: key, apps: apps })
+  }
+  var here = normalizeWorkspaceKey(focused)
+  if (here !== null && !seen[here]) rows.push({ key: here, apps: [] })
+  rows.sort(function(a, b) { return compareWorkspaceKeys(a.key, b.key) })
+  return rows
+}
+
+// The lowest workspace number that the overview does not show, for its
+// "new workspace" card. Numbers only: a name is something the user gives.
+// Null when all 99 are in use.
+function freeWorkspace(taken) {
+  var used = {}
+  var list = taken instanceof Array ? taken : []
+  for (var i = 0; i < list.length; i++) {
+    var key = normalizeWorkspaceKey(list[i])
+    if (key !== null) used[key] = true
+  }
+  for (var n = 1; n <= 99; n++) {
+    if (!used[String(n)]) return String(n)
+  }
+  return null
+}
+
+// How the overview lays out its cards. A card is a frame at the screen's
+// aspect with a caption of fixed height under it. This picks the column count
+// that gives the widest card while every card fits in `width` × `height`. A
+// tie goes to more columns, because a screen is wider than it is tall. The
+// result never scales the grid, so text stays at its real size.
+function overviewGrid(count, width, height, options) {
+  var o = options || {}
+  var n = Math.max(1, Math.floor(Number(count) || 0))
+  var aspect = isFiniteNumber(o.aspect) && o.aspect > 0 ? o.aspect : 16 / 9
+  var gap = Math.max(0, Number(o.gap) || 0)
+  var caption = Math.max(0, Number(o.caption) || 0)
+  var maxWidth = isFiniteNumber(o.maxWidth) && o.maxWidth > 0 ? o.maxWidth : Infinity
+  var maxColumns = Math.max(1, Math.floor(Number(o.maxColumns) || 5))
+  var w = Number(width) || 0
+  var h = Number(height) || 0
+  var best = null
+  for (var columns = 1; columns <= Math.min(n, maxColumns); columns++) {
+    var rows = Math.ceil(n / columns)
+    var byWidth = (w - gap * (columns - 1)) / columns
+    var byHeight = ((h - gap * (rows - 1)) / rows - caption) * aspect
+    var cardWidth = Math.max(1, Math.floor(Math.min(maxWidth, byWidth, byHeight)))
+    if (!best || cardWidth >= best.cardWidth) {
+      best = { columns: columns, rows: rows, cardWidth: cardWidth }
+    }
+  }
+  best.frameHeight = Math.max(1, Math.floor(best.cardWidth / aspect))
+  return best
+}
+
+// The width over height of a Hyprland monitor as the user sees it. A
+// transform of 1, 3, 5 or 7 turns the panel a quarter, so the sides swap.
+function monitorAspect(width, height, transform) {
+  var w = Number(width)
+  var h = Number(height)
+  if (!isFiniteNumber(w) || !isFiniteNumber(h) || w <= 0 || h <= 0) return null
+  return Number(transform) % 2 === 1 ? h / w : w / h
+}
+
+// The apps on one workspace, most windows first, ties by name. A class with
+// several windows keeps one row with its count, so three terminals read once
+// rather than three times.
+function workspaceApps(counts) {
+  var out = []
+  if (!counts || typeof counts !== "object") return out
+  for (var match in counts) {
+    var count = Number(counts[match])
+    if (!isFiniteNumber(count) || count <= 0) continue
+    out.push({ match: String(match), count: count })
+  }
+  out.sort(function(a, b) {
+    if (a.count !== b.count) return b.count - a.count
+    return a.match.localeCompare(b.match)
+  })
+  return out
+}
+
+// Numeric workspaces first in number order, named ones after them by name.
+// The strip and the overview both sort with this, so the two agree on the
+// order and a named workspace never lands between 3 and 4.
+function compareWorkspaceKeys(a, b) {
+  var an = normalizeWorkspaceId(a)
+  var bn = normalizeWorkspaceId(b)
+  if (an !== null && bn !== null) return Number(an) - Number(bn)
+  if (an !== null) return -1
+  if (bn !== null) return 1
+  return String(a).localeCompare(String(b))
+}
+
 function captureClients(clients, workspace) {
   var key = workspaceKey(workspace)
   if (key === null) return null
@@ -3753,6 +3861,12 @@ if (typeof module !== "undefined") {
     captureLayout: captureLayout,
     tiledTargets: tiledTargets,
     clientSnapshot: clientSnapshot,
+    overviewWorkspaces: overviewWorkspaces,
+    freeWorkspace: freeWorkspace,
+    overviewGrid: overviewGrid,
+    monitorAspect: monitorAspect,
+    workspaceApps: workspaceApps,
+    compareWorkspaceKeys: compareWorkspaceKeys,
     captureClients: captureClients,
     appPattern: appPattern,
     pinEntries: pinEntries,
