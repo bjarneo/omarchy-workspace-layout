@@ -383,6 +383,8 @@ Click a card or press its number to go there. The last card goes to the lowest
 free workspace and opens the panel, so you can pick a layout for it. `Esc`
 closes the overview. [docs/cli.md](docs/cli.md#the-overview) lists every key.
 
+![The overview](screenshots/overview.png)
+
 ### A keybinding
 
 The panel answers on the shell's IPC bus, so bind it in
