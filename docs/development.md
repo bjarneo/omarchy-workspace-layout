@@ -372,6 +372,15 @@ passed. Hence `omarchy.wsl.<slug>`, and hence the pin carrying `command`: no
 desktop entry mentions that class, so the pin is the only record of how to make
 such a window again. Established by probing ghostty 1.2 here.
 
+**A derived command is quoted per argument.** `rebuildCatalog` in `Panel.qml`
+turns the parsed `DesktopEntry.command` array into text with
+`Model.shellCommandFromArgs`, which runs `shellQuote` on each argument. The
+text reaches `hl.exec_cmd`, which uses `/bin/sh -c`, so a webapp URL holding
+`;`, `$(...)` or a quote must stay one literal argument. Never join an entry's
+arguments with a bare `join(" ")`, and never use `execString`. A command the
+user types in the pin editor or through `pincommand` is shell text on purpose.
+The terminal wrap keeps the quoting, because the shell splits it again.
+
 **Opening at login is claimed, not scheduled.** `autostartClaim` runs `mkdir`
 in `$XDG_RUNTIME_DIR`, keyed by `HYPRLAND_INSTANCE_SIGNATURE`, and only the
 process that creates the directory furnishes anything. Two monitors mean two

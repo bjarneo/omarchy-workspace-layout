@@ -2030,6 +2030,22 @@ function terminalSpec(id) {
   return null
 }
 
+// Turn the parsed argument list of a desktop entry into shell text that runs
+// each argument literally. A launch command ends up in `/bin/sh -c`, so an
+// argument such as a webapp URL holding `;`, `$(...)` or a quote must not reach
+// the shell bare. Every argument goes through `shellQuote`.
+function shellCommandFromArgs(args) {
+  // QML hands over `list<string>` as a sequence wrapper. `Array.isArray` says
+  // false for it, `instanceof Array` says true. Accept both, and any
+  // array-like value with a numeric length.
+  if (args === null || args === undefined || typeof args === "string") return ""
+  var isList = args instanceof Array || Array.isArray(args)
+  if (!isList && !(typeof args === "object" && typeof args.length === "number")) return ""
+  var parts = []
+  for (var i = 0; i < args.length; i++) parts.push(shellQuote(args[i]))
+  return parts.join(" ")
+}
+
 // The command that opens `command` in a terminal window called `appClass`.
 // With no terminal we recognise, fall back to the desktop standard: the app
 // opens, but under the terminal's own class, so a pin cannot place it.
@@ -3882,6 +3898,7 @@ if (typeof module !== "undefined") {
     searchApps: searchApps,
     normalizeCatalogEntry: normalizeCatalogEntry,
     launchAppLua: launchAppLua,
+    shellCommandFromArgs: shellCommandFromArgs,
     terminalLaunch: terminalLaunch,
     terminalClassFor: terminalClassFor,
     missingApps: missingApps,

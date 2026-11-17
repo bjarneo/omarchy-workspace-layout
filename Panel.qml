@@ -228,7 +228,10 @@ Panel {
       var match = String(entry.startupClass || "")
       if (match.length === 0 || match.indexOf("@@") !== -1) match = String(entry.id || "")
       if (match.length === 0) continue
-      var command = (entry.command instanceof Array) ? entry.command.join(" ") : String(entry.execString || "")
+      // Each parsed argument is quoted, so a URL or a path with shell syntax in
+      // it runs as one literal argument. The raw `execString` is never used:
+      // it is unparsed text that the shell would interpret.
+      var command = Model.shellCommandFromArgs(entry.command)
       out.push({
         match: match, name: String(entry.name || match), command: command,
         terminal: entry.runInTerminal === true, running: false

@@ -1387,6 +1387,35 @@ test("a terminal app is opened in a terminal, under its own class", () => {
     "ghostty --gtk-single-instance=false -e nvim")
 })
 
+test("a desktop entry's arguments run literally, not as shell syntax", () => {
+  const evil = "https://example.com/?a=1;touch /tmp/pwn&b=$(id)`id`'\"x"
+  const args = ["chromium", "--app=" + evil, "--user-data-dir=/home/me/My Dir"]
+  const command = Model.shellCommandFromArgs(args)
+  // Run the text through a real shell: each argument must come back unchanged.
+  const out = childProcess.execFileSync("sh", ["-c", "printf '%s\\n' " + command],
+    { encoding: "utf8" })
+  assert.equal(out, args.join("\n") + "\n")
+  assert.equal(Model.shellCommandFromArgs(["firefox", "--new-window"]), "'firefox' '--new-window'")
+  assert.equal(Model.shellQuote(""), "''")
+  assert.equal(Model.shellCommandFromArgs("not a list"), "")
+
+  // The terminal wrap keeps the quoting: the shell still sees one argument.
+  const wrapped = Model.terminalLaunch("foot", "omarchy.wsl.x", Model.shellCommandFromArgs(["echo", "a;b"]))
+  assert.equal(wrapped, "foot --app-id=omarchy.wsl.x -e 'echo' 'a;b'")
+})
+
+test("a QML list<string> that is not a real JS array still becomes quoted shell text", () => {
+  // In the QML runtime `Array.isArray` is false for a list<string>, but
+  // `instanceof Array` is true.
+  const list = Object.setPrototypeOf({ 0: "chromium", 1: "--app=https://x.test/?a=1;touch /tmp/pwn&b=$(id)", length: 2 }, Array.prototype)
+  assert.equal(Array.isArray(list), false)
+  const command = Model.shellCommandFromArgs(list)
+  assert.equal(command, "'chromium' '--app=https://x.test/?a=1;touch /tmp/pwn&b=$(id)'")
+  assert.equal(Model.shellCommandFromArgs({ 0: "a", length: 1 }), "'a'")
+  assert.equal(Model.shellCommandFromArgs({}), "")
+  assert.equal(Model.shellCommandFromArgs(null), "")
+})
+
 test("a pin remembers how it was started, because nothing else knows", () => {
   // A terminal app's window is called what we asked the terminal to call it,
   // and no desktop entry mentions that class — so the launcher would find
