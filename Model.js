@@ -1517,7 +1517,7 @@ function parseOmarchyToggleLua(text) {
 
 function parseOmarchyToggleFiles(text) {
   var source = String(text || "")
-  var re = /workspace\s*=\s*"(\d+)"\s*,\s*layout\s*=\s*"([^"]+)"/g
+  var re = /workspace\s*=\s*"(\d+)"\s*,\s*(?:layout|mode)\s*=\s*"([^"]+)"/g
   var out = []
   var match
   while ((match = re.exec(source)) !== null) {
