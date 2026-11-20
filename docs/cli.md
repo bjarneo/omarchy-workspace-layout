@@ -117,6 +117,15 @@ profile focus
 Give one workspace a layout, by id. `dwindle`, `master` and `scrolling` hand it
 to Hyprland's own tiling.
 
+`tabbed` collects the workspace's tiled windows into one native tab group,
+including windows opened or moved there later. It supports different apps in the
+same group. Floating windows and protected groups remain separate. Selecting a
+different layout stops collecting windows; use `Super+G` to dissolve the group.
+
+```sh
+omarchy-shell workspace-layout set 5 tabbed
+```
+
 ```
 $ omarchy-shell workspace-layout set 3 wide-centre
 workspace 3 uses wide-centre
